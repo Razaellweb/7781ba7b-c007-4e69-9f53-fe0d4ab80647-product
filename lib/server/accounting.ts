@@ -38,10 +38,13 @@ export async function settleReservation(operationKey: string, userDebit: MicroUs
     if (r.rows[0].status !== "reserved") return r.rows[0];
     const reserved = BigInt(r.rows[0].reserved_micro_usd);
     if (userDebit > reserved) throw new AccountingError("Settlement exceeds reservation");
-    const release = reserved - userDebit;
+    // Release the ENTIRE reservation hold, then record the actual debit as its
+    // own ledger event. Net effect across (reservation, release, user_debit) is
+    // exactly -userDebit. (Releasing only reserved-userDebit while also debiting
+    // would double-count the charge.)
     await db.query(`UPDATE compute_reservations SET status=$2, settled_micro_usd=$3, provider_cost_micro_usd=$4, uncertain=$5, settled_at=now() WHERE id=$1`, [r.rows[0].id, uncertain ? "uncertain" : "settled", userDebit.toString(), providerCostMicroUsd?.toString() ?? null, uncertain]);
+    if (reserved > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key) VALUES ($1,$2,'release',$3,$4)`, [r.rows[0].account_id, r.rows[0].id, reserved.toString(), `release:${operationKey}`]);
     if (userDebit > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key,metadata) VALUES ($1,$2,'user_debit',$3,$4,$5)`, [r.rows[0].account_id, r.rows[0].id, userDebit.toString(), `debit:${operationKey}`, JSON.stringify({ providerCostMicroUsd: providerCostMicroUsd?.toString() ?? null, uncertain })]);
-    if (release > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key) VALUES ($1,$2,'release',$3,$4)`, [r.rows[0].account_id, r.rows[0].id, release.toString(), `release:${operationKey}`]);
     return (await db.query(`SELECT * FROM compute_reservations WHERE id=$1`, [r.rows[0].id])).rows[0];
   });
 }

@@ -12,8 +12,8 @@ export class OpenRouterProvider implements InferenceProvider {
     }
     const response = await fetch(`${config.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: request.model, messages: request.messages, stream: true, stream_options: { include_usage: true } }),
+      headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://openweight.systems", "X-Title": "Openweight" },
+      body: JSON.stringify({ model: request.model, messages: request.messages, stream: true, usage: { include: true } }),
       signal: request.signal,
     });
     if (!response.ok || !response.body) {
@@ -33,10 +33,10 @@ export class OpenRouterProvider implements InferenceProvider {
           const raw = line.slice(5).trim();
           if (raw === "[DONE]") continue;
           try {
-            const event = JSON.parse(raw) as { choices?: Array<{ delta?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number }; cost?: number };
+            const event = JSON.parse(raw) as { choices?: Array<{ delta?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number } };
             const text = event.choices?.[0]?.delta?.content ?? "";
             if (text) { output += text; yield { type: "delta", text }; }
-            if (event.usage) usage = { type: "complete", output, usage: { inputTokens: event.usage.prompt_tokens ?? null, outputTokens: event.usage.completion_tokens ?? null, providerCostMicroUsd: typeof event.cost === "number" ? BigInt(Math.round(event.cost * 1_000_000)) : null, uncertain: typeof event.cost !== "number" } };
+            if (event.usage) { const cost = event.usage.cost; usage = { type: "complete", output, usage: { inputTokens: event.usage.prompt_tokens ?? null, outputTokens: event.usage.completion_tokens ?? null, providerCostMicroUsd: typeof cost === "number" ? BigInt(Math.round(cost * 1_000_000)) : null, uncertain: typeof cost !== "number" } }; }
           } catch {
             yield { type: "error", error: { code: "malformed_response", message: "Provider returned an invalid stream event", retryable: true } };
             return;

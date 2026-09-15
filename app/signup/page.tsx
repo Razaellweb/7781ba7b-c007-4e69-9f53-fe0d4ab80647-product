@@ -1,2 +1,2 @@
-import AppShell from "../../components/AppShell";
-export default function Page(){return <AppShell page="entry"/>}
+import EntryClient from "../entry/EntryClient";
+export default function Page(){return <EntryClient/>}
