@@ -1,2 +1,5 @@
-import AppShell from "../../components/AppShell";
-export default function Page(){return <AppShell page="settings"/>}
+import { redirect } from "next/navigation";
+
+export default function SettingsPage() {
+  redirect("/dashboard");
+}
