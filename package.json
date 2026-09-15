@@ -4,12 +4,17 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@farcaster/frame-sdk": "^0.0.64",
+    "@farcaster/mini-app-solana": "^0.0.20",
+    "@privy-io/react-auth": "^3.42.0",
     "@privy-io/server-auth": "^1.32.5",
+    "@solana/wallet-adapter-react": "^0.15.40",
+    "@stripe/stripe-js": "^9.16.0",
     "jose": "^6.2.12",
     "next": "16.1.4",
     "pg": "^8.23.0",

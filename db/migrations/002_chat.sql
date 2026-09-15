@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS conversations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES user_accounts(id), title text NOT NULL DEFAULT 'Untitled conversation', created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS conversations_account_time ON conversations(account_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid NOT NULL REFERENCES conversations(id), account_id uuid NOT NULL REFERENCES user_accounts(id), role text NOT NULL CHECK (role IN ('user','assistant')), content text NOT NULL, partial boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS messages_conversation_time ON messages(conversation_id, created_at);
