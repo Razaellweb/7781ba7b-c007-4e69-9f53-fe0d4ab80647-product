@@ -1,6 +1,7 @@
 "use client";
 
 import { CSSProperties, FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { usePrivy } from "@privy-io/react-auth";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -37,6 +38,7 @@ const usd = (micro: string | null | undefined) => micro == null ? "—" : `$${(N
 
 export default function DashboardPage() {
   const { ready, authenticated, getAccessToken, logout } = usePrivy();
+  const router = useRouter();
   const [eligibility, setEligibility] = useState<Eligibility>("loading");
   const [wallet, setWallet] = useState("");
   const [balance, setBalance] = useState("0.00");
@@ -110,7 +112,11 @@ export default function DashboardPage() {
     } catch { /* leave unloaded; will retry on next select */ }
   }, [authHeaders]);
 
-  useEffect(() => { if (ready) void refresh(); }, [ready, authenticated, refresh]);
+  // Route guard: a logged-out visitor must not reach the dashboard. Once Privy
+  // has resolved auth state (ready) and the user is not authenticated, send them
+  // to the login page.
+  useEffect(() => { if (ready && !authenticated) router.replace("/signup"); }, [ready, authenticated, router]);
+  useEffect(() => { if (ready && authenticated) void refresh(); }, [ready, authenticated, refresh]);
   useEffect(() => { if (ready && authenticated) void loadConversations(); }, [ready, authenticated, loadConversations]);
   // Lazily fetch messages for the selected conversation the first time it opens.
   useEffect(() => {
@@ -202,6 +208,12 @@ export default function DashboardPage() {
   const statusText = { loading: "VERIFYING", eligible: "ELIGIBLE", insufficient_balance: "NOT ELIGIBLE", wrong_network: "WRONG NETWORK", verification_error: "VERIFICATION ERROR", unauthenticated: "AUTHENTICATION REQUIRED" }[eligibility];
 
   function newConversation() { setConversations((items) => [draft(), ...items]); setSelected(0); setView("chat"); }
+
+  // Do not render the dashboard for logged-out or still-resolving sessions —
+  // the redirect effect above sends unauthenticated visitors to /signup.
+  if (!ready || !authenticated) {
+    return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large">✦</span><p>{ready ? "Redirecting to sign in…" : "Verifying your session…"}</p></div></main>;
+  }
 
   return <main className="dashboard"><aside className="sidebar"><div className="brand"><span className="mark">✦</span> OPENWEIGHT</div><div className="eyebrow">WORKSPACE</div><nav><a className={view === "chat" ? "active" : ""} href="#chat" onClick={(e) => { e.preventDefault(); setView("chat"); }}>◌ <span>Workspace</span></a><a className={view === "compute" ? "active" : ""} href="#compute" onClick={(e) => { e.preventDefault(); openCompute(); }}>◉ <span>Compute activity</span></a></nav><div className="side-status"><span className="dot" /> {statusText}<br/><small>{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "No canonical wallet"}</small></div><button className="exit" onClick={() => void logout()}>Sign out ↗</button></aside><section className="main"><header className="mobile-head"><span className="brand">OPENWEIGHT</span><span className="dot" /></header><header className="topbar"><div><div className="eyebrow">WORKSPACE / SERVER-VERIFIED</div><h1>Think with curated<br/><em>open-weight models.</em></h1><p>Eligibility, wallet identity, allowance, and inference are verified server-side before billable work begins.</p></div><div className="balance"><span>AVAILABLE COMPUTE</span><b>${balance}</b><button onClick={() => { void refresh(); if (view === "compute") void loadActivity(); }}>Refresh status ↻</button></div></header><div className="workspace"><section className="history panel"><button className="new-chat" onClick={newConversation}>＋ New conversation</button><label className="search">⌕ <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search history"/></label><div className="history-list">{filtered.map((item) => { const index = conversations.indexOf(item); return <div key={(item.id ?? item.title) + index} className={`history-item ${item === current && view === "chat" ? "selected" : ""}`}><button className="history-open" onClick={() => void selectConversation(index)}><span>{item.title}</span><small>{item.date}</small></button><button className="history-delete" aria-label={`Delete ${item.title}`} title="Delete conversation" onClick={() => setConfirmDelete(index)}>🗑</button></div>; })}</div></section>{view === "compute" ? <section className="chat panel" id="compute"><div className="chat-head"><span>OPENWEIGHT / COMPUTE ACTIVITY</span><button className="ghost" onClick={() => void loadActivity()}>Reload ↻</button></div><div className="activity">{activityState === "loading" ? <p className="muted">Loading compute activity…</p> : activityState === "error" ? <div className="welcome"><span className="mark large">⚠</span><h2>Couldn’t load compute activity</h2><p>The activity service didn’t respond. This is usually transient.</p><div className="suggestions"><button onClick={() => void loadActivity()}>Retry ↻</button></div></div> : !activity || activity.length === 0 ? <div className="welcome"><span className="mark large">◉</span><h2>No compute activity yet</h2><p>Metered inference runs will appear here with token counts and settled cost.</p></div> : <table className="activity-table"><thead><tr><th>When</th><th>Model</th><th>Status</th><th>In / Out</th><th>Provider cost</th><th>Your debit</th></tr></thead><tbody>{activity.map((a) => <tr key={a.operation_key}><td>{relativeTime(a.created_at)}</td><td>{labels[a.model] ?? a.model}</td><td><span className={`pill ${a.status}`}>{a.status}</span></td><td>{a.input_tokens ?? "—"} / {a.output_tokens ?? "—"}</td><td>{usd(a.provider_cost_micro_usd)}</td><td>{usd(a.user_debit_micro_usd)}</td></tr>)}</tbody></table>}</div></section> : <section className="chat panel" id="chat"><div className="chat-head"><span>OPENWEIGHT / CHAT</span><span className={`eligible ${eligibility !== "eligible" ? "degraded" : ""}`}><i/> {statusText}</span></div><div className="messages" ref={messagesRef}>{current.messages.length === 0 && !streaming ? <div className="welcome"><span className="mark large">✦</span><h2>What are you working on?</h2><p>{eligibility === "eligible" ? "Choose an approved model, then send a prompt to begin." : eligibility === "loading" ? "Checking your authenticated account and holder status…" : "Chat remains locked until server verification confirms eligibility."}</p><div className="suggestions"><button onClick={() => setPrompt("Compare the trade-offs in my current plan")}>Compare a plan ↗</button><button onClick={() => setPrompt("Summarize research on open models")}>Summarize research ↗</button></div></div> : current.messages.map((message, index) => <article className={message.role} key={index}><span>{message.role === "user" ? "YOU" : `OPENWEIGHT · ${(labels[message.model ?? model] ?? "MODEL").toUpperCase()}`}</span>{message.role === "assistant" ? <>{<Markdown text={message.text} />}{message.partial && <small className="partial"> · partial</small>}</> : <p>{message.text}</p>}</article>)}{streaming && <article className="assistant streaming"><span>OPENWEIGHT · {(labels[model] ?? "MODEL").toUpperCase()}</span>{streamingText ? <Markdown text={streamingText} /> : <p className="typing">● ● ●</p>}<button onClick={stop}>■ Stop response</button></article>}</div><form className="composer" onSubmit={submit}><select aria-label="Select approved model" value={model} onChange={(e) => setModel(e.target.value)}><option value="auto">Auto routing</option>{models.map((item) => <option key={item} value={item}>{labels[item]}</option>)}</select><input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Message Openweight..." aria-label="Message Openweight"/><button type="submit" disabled={!prompt.trim() || streaming || eligibility !== "eligible"}>↑</button><small>{labels[model] ?? "Auto routing"} · metered inference</small></form>{notice && <div className="notice" role="status">{notice}</div>}</section>}</div></section>{confirmDelete !== null && (() => {
   const target = conversations[confirmDelete]; if (!target) return null;
