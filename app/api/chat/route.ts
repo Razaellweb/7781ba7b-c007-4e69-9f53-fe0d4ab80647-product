@@ -34,10 +34,15 @@ export async function POST(request: Request) {
     const eligibility = await verifyHolder(account);
     if (eligibility.state !== "eligible") return NextResponse.json({ error: "Holder eligibility must be confirmed before inference", code: eligibility.state, requestId }, { status: 403 });
 
-    // Resolve / verify conversation ownership.
-    const conversationId = body.conversationId ?? (await query<{ id: string }>(`INSERT INTO conversations (account_id) VALUES ($1) RETURNING id`, [account.accountId]))[0].id;
+    // Derive a human-readable title from the first user message so history is
+    // legible instead of every row reading "Untitled conversation".
+    const derivedTitle = text.slice(0, 60);
+    // Resolve / verify conversation ownership, seeding the title on creation.
+    const conversationId = body.conversationId ?? (await query<{ id: string }>(`INSERT INTO conversations (account_id, title) VALUES ($1,$2) RETURNING id`, [account.accountId, derivedTitle]))[0].id;
     const owned = await query(`SELECT id FROM conversations WHERE id=$1 AND account_id=$2`, [conversationId, account.accountId]);
     if (!owned.length) return NextResponse.json({ error: "Conversation not found", code: "NOT_FOUND", requestId }, { status: 404 });
+    // Backfill the title if an existing conversation is still on the default.
+    if (body.conversationId) await query(`UPDATE conversations SET title=$3 WHERE id=$1 AND account_id=$2 AND (title IS NULL OR title IN ('Untitled conversation','New conversation'))`, [conversationId, account.accountId, derivedTitle]);
 
     const operationKey = body.operationKey ?? body.clientRequestId ?? requestId;
 
@@ -46,7 +51,14 @@ export async function POST(request: Request) {
       `SELECT role, content FROM messages WHERE conversation_id=$1 AND partial=false ORDER BY created_at ASC LIMIT $2`,
       [conversationId, CONTEXT_LIMIT]
     );
-    const contextMessages: InferenceMessage[] = [...priorRows.map(r => ({ role: r.role, content: r.content })), { role: "user", content: text }];
+    // Steer language explicitly: open-weight models like GLM default to Chinese
+    // without a system prompt. Match the user's language, defaulting to English.
+    const systemPrompt: InferenceMessage = {
+      role: "system",
+      content:
+        "You are Openweight, a helpful AI assistant. Always respond in the same language the user writes in. If the user's language is unclear, respond in English. Do not default to Chinese.",
+    };
+    const contextMessages: InferenceMessage[] = [systemPrompt, ...priorRows.map(r => ({ role: r.role, content: r.content })), { role: "user", content: text }];
 
     // Persist the user message and open an inference record.
     await query(`INSERT INTO messages (conversation_id,account_id,role,content) VALUES ($1,$2,'user',$3)`, [conversationId, account.accountId, text]);

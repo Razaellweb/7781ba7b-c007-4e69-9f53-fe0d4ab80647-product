@@ -22,3 +22,22 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: "Unable to load conversation", code: "CONVERSATION_UNAVAILABLE" }, { status: 503 });
   }
 }
+
+// Permanently deletes a conversation and its messages, rejecting access to
+// another account's conversation (PRD §28.7, §29.1).
+export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    await ensureMigrated();
+    const account = await authenticatePrivyRequest(request.headers.get("authorization"));
+    const { id } = await params;
+    const owned = await query(`SELECT id FROM conversations WHERE id=$1 AND account_id=$2`, [id, account.accountId]);
+    if (!owned.length) return NextResponse.json({ error: "Conversation not found", code: "NOT_FOUND" }, { status: 404 });
+    await query(`DELETE FROM messages WHERE conversation_id=$1 AND account_id=$2`, [id, account.accountId]);
+    await query(`DELETE FROM inference_records WHERE conversation_id=$1 AND account_id=$2`, [id, account.accountId]);
+    await query(`DELETE FROM conversations WHERE id=$1 AND account_id=$2`, [id, account.accountId]);
+    return NextResponse.json({ deleted: id });
+  } catch (error) {
+    if (error instanceof AuthenticationError) return NextResponse.json({ error: error.message, code: error.code }, { status: 401 });
+    return NextResponse.json({ error: "Unable to delete conversation", code: "CONVERSATION_DELETE_FAILED" }, { status: 503 });
+  }
+}

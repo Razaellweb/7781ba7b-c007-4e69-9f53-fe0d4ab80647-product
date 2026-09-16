@@ -17,30 +17,47 @@ export class OpenRouterProvider implements InferenceProvider {
       signal: request.signal,
     });
     if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => "");
+      console.error(`[openrouter] upstream request failed status=${response.status} model=${request.model} body=${detail.slice(0, 500)}`);
       yield { type: "error", error: { code: response.status === 429 ? "rate_limited" : "upstream", message: "Inference provider request failed", retryable: response.status >= 500 || response.status === 429 } };
       return;
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let output = "";
+    let buffer = "";
     let usage: InferenceChunk = { type: "complete", output: "", usage: { inputTokens: null, outputTokens: null, providerCostMicroUsd: null, uncertain: true } };
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        for (const line of decoder.decode(value, { stream: true }).split("\n")) {
+        // Buffer across reads: an SSE line may be split across chunk boundaries.
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // keep the last, possibly-incomplete line for the next read
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
           if (!line.startsWith("data:")) continue;
           const raw = line.slice(5).trim();
-          if (raw === "[DONE]") continue;
+          if (!raw || raw === "[DONE]") continue;
+          let event: { choices?: Array<{ delta?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number }; error?: { message?: string; code?: number | string } };
           try {
-            const event = JSON.parse(raw) as { choices?: Array<{ delta?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number } };
-            const text = event.choices?.[0]?.delta?.content ?? "";
-            if (text) { output += text; yield { type: "delta", text }; }
-            if (event.usage) { const cost = event.usage.cost; usage = { type: "complete", output, usage: { inputTokens: event.usage.prompt_tokens ?? null, outputTokens: event.usage.completion_tokens ?? null, providerCostMicroUsd: typeof cost === "number" ? BigInt(Math.round(cost * 1_000_000)) : null, uncertain: typeof cost !== "number" } }; }
+            event = JSON.parse(raw);
           } catch {
+            // A parse failure here means a genuinely malformed event (buffering
+            // already handles split lines), so surface it rather than looping.
+            console.error(`[openrouter] malformed stream event model=${request.model} raw=${raw.slice(0, 300)}`);
             yield { type: "error", error: { code: "malformed_response", message: "Provider returned an invalid stream event", retryable: true } };
             return;
           }
+          if (event.error) {
+            console.error(`[openrouter] in-stream error model=${request.model} error=${JSON.stringify(event.error).slice(0, 500)}`);
+            yield { type: "error", error: { code: "upstream", message: event.error.message || "Inference provider returned an error", retryable: true } };
+            return;
+          }
+          const text = event.choices?.[0]?.delta?.content ?? "";
+          if (text) { output += text; yield { type: "delta", text }; }
+          if (event.usage) { const cost = event.usage.cost; usage = { type: "complete", output, usage: { inputTokens: event.usage.prompt_tokens ?? null, outputTokens: event.usage.completion_tokens ?? null, providerCostMicroUsd: typeof cost === "number" ? BigInt(Math.round(cost * 1_000_000)) : null, uncertain: typeof cost !== "number" } }; }
         }
       }
       yield usage;
