@@ -1,17 +1,23 @@
-/* Post-comparison transition into the Openweight.systems product layer. */
+/* Keep the screenshot hero and every following landing section in normal document flow. */
 .landing {
   display: flex;
   flex-direction: column;
 }
 
-/* The focused comparison is followed immediately by the access layer. */
-.landing > .hero { order: 1; }
-.landing > .frontier-shift { order: 2; }
-.landing > .benchmark-section { order: 3; }
-.landing > .comparison-section { order: 4; }
-.landing > .light-section { order: 5; }
-.landing > .practice { order: 6; }
-.landing > .closing { order: 7; }
+.landing > .hero {
+  order: 0;
+  flex: 0 0 auto;
+}
+
+.landing > .frontier-shift,
+.landing > .proof-section,
+.landing > .comparison-section,
+.landing > .practice,
+.landing > .light-section,
+.landing > .closing {
+  order: 0;
+  flex: 0 0 auto;
+}
 
 .landing > .light-section {
   position: relative;
