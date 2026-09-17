@@ -1,0 +1,59 @@
+/* Post-comparison transition into the Openweight.systems product layer. */
+.landing {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The focused comparison is followed immediately by the access layer. */
+.landing > .hero { order: 1; }
+.landing > .frontier-shift { order: 2; }
+.landing > .benchmark-section { order: 3; }
+.landing > .comparison-section { order: 4; }
+.landing > .light-section { order: 5; }
+.landing > .practice { order: 6; }
+.landing > .closing { order: 7; }
+
+.landing > .light-section {
+  position: relative;
+  overflow: hidden;
+}
+
+.landing > .light-section > div:first-child {
+  position: relative;
+}
+
+.landing > .light-section > div:first-child::after {
+  content: "DeepSeek / GLM / Kimi / Qwen  →  OPENWEIGHT.SYSTEMS  →  FRONTIER INTELLIGENCE  →  COMPUTE AT SCALE";
+  display: block;
+  max-width: 700px;
+  margin-top: 58px;
+  color: #68777c;
+  font: 10px/1.8 var(--font-geist-mono), monospace;
+  letter-spacing: .08em;
+}
+
+.landing > .light-section .intro-note {
+  font-size: 0;
+  line-height: 1.55;
+}
+
+.landing > .light-section .intro-note::after {
+  content: "Openweight.systems gives you access to it.";
+  display: block;
+  color: #696a70;
+  font: 15px/1.55 Arial, Helvetica, sans-serif;
+}
+
+@media (max-width: 700px) {
+  .landing > .light-section > div:first-child::after {
+    max-width: 280px;
+    margin-top: 42px;
+    line-height: 2.1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing > .light-section > div:first-child::after {
+    transition: none;
+  }
+}
