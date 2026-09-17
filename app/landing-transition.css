@@ -63,3 +63,96 @@
     transition: none;
   }
 }
+
+/* Standalone landing-page How It Works section: dark editorial treatment. */
+.landing > .landing-how {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  overflow: hidden;
+  background: #101011 !important;
+  color: #eeeeec !important;
+  border-top: 1px solid #29292c;
+  padding: clamp(96px, 11vw, 160px) clamp(20px, 9vw, 130px) clamp(112px, 13vw, 180px) !important;
+}
+
+.landing-how-inner {
+  width: min(1180px, 100%);
+  max-width: 1180px;
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.landing-how-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 390px);
+  gap: clamp(28px, 5vw, 64px);
+  align-items: end;
+  min-width: 0;
+}
+
+.landing-how-label {
+  color: #85868c !important;
+  font: 9px var(--font-geist-mono), monospace;
+  letter-spacing: .14em;
+  overflow-wrap: anywhere;
+}
+
+.landing-how h2 {
+  color: #eeeeec !important;
+  font-size: clamp(3.2rem, 7vw, 7.5rem);
+  font-weight: 400;
+  letter-spacing: -.09em;
+  line-height: .87;
+  margin: 22px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.landing-how-heading p {
+  color: #bfc0c5 !important;
+  font-size: 15px;
+  line-height: 1.65;
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+.landing-how-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: clamp(58px, 8vw, 92px);
+  border-block: 1px solid #36363a;
+  min-width: 0;
+}
+
+.landing-how-step {
+  min-width: 0;
+  min-height: 205px;
+  padding: 24px 22px;
+  border-right: 1px solid #36363a;
+  overflow-wrap: anywhere;
+}
+
+.landing-how-step:last-child { border-right: 0; }
+.landing-how-step b { color: #e57454 !important; font: 10px var(--font-geist-mono), monospace; letter-spacing: .08em; }
+.landing-how-step strong { display: block; color: #eeeeec !important; margin-top: 48px; font: 13px var(--font-geist-mono), monospace; letter-spacing: .02em; overflow-wrap: anywhere; }
+.landing-how-step span { display: block; color: #85868c !important; font-size: 13px; line-height: 1.55; margin-top: 10px; overflow-wrap: anywhere; }
+
+@media (max-width: 800px) {
+  .landing > .landing-how { padding: 96px 7vw 120px !important; }
+  .landing-how-heading { display: block; }
+  .landing-how-heading p { max-width: 470px; margin-top: 28px; }
+  .landing-how-steps { grid-template-columns: 1fr; margin-top: 60px; }
+  .landing-how-step { min-height: 0; padding: 24px 0 28px; border-right: 0; border-bottom: 1px solid #36363a; }
+  .landing-how-step strong { margin-top: 27px; }
+  .landing-how-step:last-child { border-bottom: 0; }
+}
+
+@media (max-width: 460px) {
+  .landing > .landing-how { padding-inline: 20px !important; }
+  .landing-how h2 { font-size: clamp(3rem, 15vw, 5rem); }
+  .landing-how-step { padding-inline: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-how * { transition: none !important; }
+}
