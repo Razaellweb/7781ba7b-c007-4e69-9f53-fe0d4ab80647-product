@@ -1,0 +1,72 @@
+/* Supplied Openweight mark: preserve the source image's square ratio and dark treatment. */
+:root {
+  --ow-brand-asset: url("/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png");
+}
+
+.ow-mark,
+.dashboard .mark {
+  color: transparent;
+  background-color: #050505;
+  background-image: var(--ow-brand-asset);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  overflow: hidden;
+  transform: none;
+}
+
+.hero .brand,
+.dashboard .mobile-head .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hero .brand::before,
+.dashboard .mobile-head .brand::before {
+  content: "";
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  background: #050505 var(--ow-brand-asset) center / contain no-repeat;
+  border-radius: 50%;
+}
+
+.ow-mobile-header > span:nth-child(2) {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: transparent;
+}
+
+.ow-mobile-header > span:nth-child(2)::before {
+  content: "";
+  display: inline-block;
+  width: 27px;
+  height: 27px;
+  background: #050505 var(--ow-brand-asset) center / contain no-repeat;
+  border-radius: 50%;
+}
+
+@media (max-width: 700px) {
+  .hero .brand::before,
+  .dashboard .mobile-head .brand::before {
+    width: 25px;
+    height: 25px;
+    flex-basis: 25px;
+  }
+
+  .ow-mark.large,
+  .dashboard .mark.large {
+    width: 45px;
+    height: 45px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero .brand::before,
+  .dashboard .mobile-head .brand::before {
+    transition: none;
+  }
+}
