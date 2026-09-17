@@ -1,0 +1,48 @@
+/* Dedicated coverage layer for the interactive system, API, benchmark, and help panels. */
+[class~="&&"] { display: block; }
+.access-system { width: 100%; }
+.access-system-head,.access-system-body,.access-system-foot,.access-conversation-top { box-sizing: border-box; }
+.access-system-head { min-height: 82px; }
+.access-system-label,.api-label,.api-code-label,.api-models-label,.api-playground-kicker,.api-playground-notice,.api-landing-label,.benchmark-proof-label,.benchmark-side-label,.how-aside-label { text-transform: uppercase; }
+.access-system-body { width: 100%; }
+.access-system-models,.access-conversation,.benchmark-side,.how-aside { min-width: 0; }
+.access-model { min-height: 44px; }
+.access-conversation { min-height: 0; }
+.access-conversation-top { min-height: 48px; }
+.access-live { white-space: nowrap; }
+.access-messages { overflow: auto; }
+.access-message,.api-footnote,.api-helper,.benchmark-note,.benchmark-proof { overflow-wrap: anywhere; }
+.access-composer { min-width: 0; }
+.access-composer input { min-width: 0; width: 100%; }
+.access-system-foot { min-height: 44px; }
+.admin-panel,.api-playground,.benchmark-comparison { width: 100%; min-width: 0; }
+.api-playground-intro,.api-playground-layout,.api-actions,.api-code-label { box-sizing: border-box; }
+.api-playground-layout { width: 100%; }
+.api-models,.api-request,.api-response { min-width: 0; }
+.api-endpoint select,.api-code,.api-result { max-width: 100%; }
+.api-code { box-sizing: border-box; }
+.api-progress { width: 100%; }
+.api-submit,.api-reset { white-space: nowrap; }
+.api-landing-heading { max-width: 900px; }
+.api-landing-inner { width: min(1180px, 100%); margin-inline: auto; }
+.api-landing-section { position: relative; }
+.api-metadata { min-width: 0; }
+.api-models-label { margin-bottom: 12px; }
+.benchmark-comparison-toolbar,.benchmark-proof-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.benchmark-copy-affordance { cursor: pointer; }
+.benchmark-metric { min-width: 0; }
+.benchmark-proof-head { margin-bottom: 12px; }
+.benchmark-proof-label,.benchmark-side-label,.how-aside-label { display: block; }
+.benchmark-side- { display: block; }
+.big { font-size: clamp(2rem, 5vw, 4rem); letter-spacing: -.06em; }
+.current { color: var(--ow-ink, #171719); }
+.empty { color: #8b8d94; }
+.entry-glow { position: absolute; inset: 0; pointer-events: none; }
+.entry-status { display: block; min-height: 1em; }
+.error { color: #a44e43; }
+@media (max-width: 700px) {
+  .access-system-foot,.benchmark-comparison-toolbar,.benchmark-proof-head { display: block; }
+  .access-system-foot > * + *, .benchmark-comparison-toolbar > * + *, .benchmark-proof-head > * + * { margin-top: 10px; }
+  .api-playground-layout { display: block; }
+  .api-models { border-right: 0; }
+}
