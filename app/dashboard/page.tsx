@@ -1,219 +1,228 @@
 "use client";
 
-import { CSSProperties, FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import type { ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useRouter } from "next/navigation";
+import "./dashboard.css";
 
-type Message = { role: "user" | "assistant"; text: string; partial?: boolean; model?: string };
-type Conversation = { id?: string; title: string; date: string; messages: Message[]; loaded?: boolean };
-type Activity = { operation_key: string; model: string; provider_model: string | null; status: string; input_tokens: number | null; output_tokens: number | null; provider_cost_micro_usd: string | null; user_debit_micro_usd: string | null; created_at: string; completed_at: string | null };
 type Eligibility = "loading" | "eligible" | "insufficient_balance" | "wrong_network" | "verification_error" | "unauthenticated";
-const models = ["glm-4.5", "qwen3-235b-a22b", "deepseek-v3.1", "kimi-k2"];
-const labels: Record<string, string> = { "glm-4.5": "GLM-4.5", "qwen3-235b-a22b": "Qwen3 235B A22B", "deepseek-v3.1": "DeepSeek-V3.1", "kimi-k2": "Kimi K2" };
-const draft = (): Conversation => ({ title: "New conversation", date: "Just now", messages: [], loaded: true });
+type LoadState = "idle" | "loading" | "ready" | "error";
+type Activity = { operation_key: string; model: string; status: string; input_tokens: number | null; output_tokens: number | null; user_debit_micro_usd: string | null; created_at: string };
+type Model = {
+  id: string;
+  displayName: string;
+  family: string | null;
+  featured: boolean;
+  registryStatus: string;
+  provider: string;
+  contextLength: number | null;
+  canonicalProviderModelId: string | null;
+  pricing: { prompt?: string; completion?: string; input_cache_read?: string; input_cache_write?: string };
+  inputModalities: string[];
+  outputModalities: string[];
+  supportedParameters: string[];
+  availability: "available" | "unavailable" | "stale";
+  syncStatus: string;
+};
 
-const Markdown = memo(function Markdown({ text }: { text: string }) {
-  return <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></div>;
-});
+const clampMicroUsd = (micro: string | null | undefined) => {
+  try {
+    const value = BigInt(micro ?? "0");
+    return value > 0n ? value : 0n;
+  } catch {
+    return 0n;
+  }
+};
 
-function relativeTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const diff = Math.max(0, Date.now() - then);
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "Just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+const formatMicroUsd = (micro: string | null | undefined) => {
+  const value = clampMicroUsd(micro);
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n).toString().padStart(6, "0");
+  return `$${whole.toString()}.${fraction}`;
+};
+
+const compactUsd = (micro: string | null | undefined) => micro == null ? "—" : formatMicroUsd(micro);
+const providerUsd = (value: string | undefined) => {
+  if (value == null || !Number.isFinite(Number(value))) return null;
+  return `$${(Number(value) * 1_000_000).toFixed(2)}`;
+};
+const contextLabel = (value: number | null) => {
+  if (value == null || value <= 0) return null;
+  return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M tokens` : `${Math.round(value / 1000)}K tokens`;
+};
+const relativeTime = (iso: string) => {
+  const timestamp = new Date(iso).getTime();
+  if (Number.isNaN(timestamp)) return "";
+  const minutes = Math.floor(Math.max(0, Date.now() - timestamp) / 60000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+};
+
+function StatusPanel({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
+  return <div className="compute-status-panel"><span className="compute-status-mark">×</span><div><h2>{title}</h2><p>{body}</p>{action}</div></div>;
 }
 
-const usd = (micro: string | null | undefined) => micro == null ? "—" : `$${(Number(micro) / 1_000_000).toFixed(4)}`;
+function ModelCard({ model, canUse, onOpen }: { model: Model; canUse: boolean; onOpen: (model: Model) => void }) {
+  const operational = model.availability === "available" && model.syncStatus === "current" && model.registryStatus === "active";
+  const input = providerUsd(model.pricing.prompt);
+  const output = providerUsd(model.pricing.completion);
+  const cached = providerUsd(model.pricing.input_cache_read);
+  const tags = [...new Set([...model.inputModalities, ...model.outputModalities, ...model.supportedParameters])].slice(0, 5);
+  const statusLabel = model.registryStatus === "paused" ? "Paused" : model.availability === "stale" ? "Stale metadata" : model.availability === "unavailable" ? "Unavailable" : operational ? "Operational" : "Not ready";
+  const statusClass = operational ? "" : model.registryStatus === "paused" ? "paused" : "unavailable";
+  return <button type="button" className={`compute-model-card ${!operational || !canUse ? "is-gated" : ""}`} onClick={() => onOpen(model)} aria-label={`View details for ${model.displayName}`}>
+    <div className="model-card-top"><span className="model-glyph">{(model.family || model.displayName).slice(0, 2).toUpperCase()}</span><span className={`model-status ${statusClass}`}><i /> {statusLabel}</span></div>
+    <h3>{model.displayName}</h3>
+    {model.family && <p>{model.family}</p>}
+    {model.canonicalProviderModelId && <code className="model-provider-id">{model.canonicalProviderModelId}</code>}
+    {(input || output || cached) && <div className="model-pricing"><span>{input && `Input ${input} / 1M`}</span><span>{output && `Output ${output} / 1M`}</span><span>{cached && `Cached input ${cached} / 1M`}</span></div>}
+    {(contextLabel(model.contextLength) || tags.length > 0) && <div className="model-tags">{contextLabel(model.contextLength) && <span className="model-tag">{contextLabel(model.contextLength)}</span>}{tags.map((tag) => <span className="model-tag" key={tag}>{tag}</span>)}</div>}
+    <span className="model-card-action">View model details <span aria-hidden="true">↗</span></span>
+  </button>;
+}
+
+function ModelDetails({ model, canUse, onClose, onUse, onCopy }: { model: Model; canUse: boolean; onClose: () => void; onUse: () => void; onCopy: () => void }) {
+  const operational = model.availability === "available" && model.syncStatus === "current" && model.registryStatus === "active";
+  const statusLabel = model.registryStatus === "paused" ? "Paused" : model.availability === "stale" ? "Stale metadata" : model.availability === "unavailable" ? "Unavailable" : operational ? "Operational" : "Not ready";
+  const input = providerUsd(model.pricing.prompt);
+  const output = providerUsd(model.pricing.completion);
+  const cached = providerUsd(model.pricing.input_cache_read);
+  const tags = [...new Set([...model.inputModalities, ...model.outputModalities, ...model.supportedParameters])];
+  return <div className="model-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="model-modal" role="dialog" aria-modal="true" aria-labelledby="model-details-title">
+      <header className="model-modal-header"><div><div className="compute-card-label">CURATED MODEL</div><h2 id="model-details-title">{model.displayName}</h2></div><button type="button" className="model-modal-close" onClick={onClose} aria-label="Close model details">×</button></header>
+      <div className="model-modal-body">
+        <div className="model-detail-status"><span className={`model-status ${operational ? "" : "unavailable"}`}><i /> {statusLabel}</span>{model.provider && <span className="model-detail-access">Access · curated {model.provider}</span>}</div>
+        {model.canonicalProviderModelId && <div className="model-id-block"><span className="model-detail-label">CANONICAL PROVIDER ID</span><div className="model-id-row"><code>{model.canonicalProviderModelId}</code><button type="button" onClick={onCopy}>Copy ID</button></div></div>}
+        <div className="model-detail-grid">
+          {(input || output || cached) && <div className="model-detail-group"><h3>Pricing <small>per 1M tokens</small></h3>{input && <p><span>Input</span><b>{input}</b></p>}{output && <p><span>Output</span><b>{output}</b></p>}{cached && <p><span>Cached input</span><b>{cached}</b></p>}</div>}
+          {(contextLabel(model.contextLength) || tags.length > 0) && <div className="model-detail-group"><h3>Capabilities</h3>{contextLabel(model.contextLength) && <p><span>Context window</span><b>{contextLabel(model.contextLength)}</b></p>}{tags.length > 0 && <div className="model-detail-tags">{tags.map((tag) => <span className="model-tag" key={tag}>{tag}</span>)}</div>}</div>}
+        </div>
+        <div className="model-modal-footer">{!canUse ? <p className="model-modal-note">Insufficient compute allowance. Add available compute before selecting a model.</p> : !operational ? <p className="model-modal-note">This model is not currently operational. Refresh before trying again.</p> : <button type="button" className="model-use-button" onClick={onUse}>Use this model in chat <span aria-hidden="true">→</span></button>}</div>
+      </div>
+    </section>
+  </div>;
+}
 
 export default function DashboardPage() {
   const { ready, authenticated, getAccessToken, logout } = usePrivy();
   const router = useRouter();
   const [eligibility, setEligibility] = useState<Eligibility>("loading");
   const [wallet, setWallet] = useState("");
-  const [balance, setBalance] = useState("0.00");
+  const [balanceMicroUsd, setBalanceMicroUsd] = useState("0");
+  const [models, setModels] = useState<Model[]>([]);
+  const [activity, setActivity] = useState<Activity[]>([]);
+  const [computeState, setComputeState] = useState<LoadState>("idle");
+  const [modelsState, setModelsState] = useState<LoadState>("idle");
   const [notice, setNotice] = useState("");
-  const [conversations, setConversations] = useState<Conversation[]>([draft()]);
-  const [selected, setSelected] = useState(0);
-  const [query, setQuery] = useState("");
-  const [model, setModel] = useState(models[0]);
-  const [prompt, setPrompt] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [streamingText, setStreamingText] = useState("");
-  const [activeOp, setActiveOp] = useState<string | undefined>(undefined);
-  const [view, setView] = useState<"chat" | "compute">("chat");
-  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
-  const [activity, setActivity] = useState<Activity[] | null>(null);
-  const [activityState, setActivityState] = useState<"idle" | "loading" | "error" | "ready">("idle");
-  const messagesRef = useRef<HTMLDivElement>(null);
-  const current = conversations[selected] ?? conversations[0];
-  const filtered = useMemo(() => conversations.filter((item) => item.title.toLowerCase().includes(query.toLowerCase())), [conversations, query]);
+  const [selectedModel, setSelectedModel] = useState<Model | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState("");
 
   const authHeaders = useCallback(async () => {
     const token = await getAccessToken();
-    if (!token) throw new Error("no token");
+    if (!token) throw new Error("No authenticated token");
     return { Authorization: `Bearer ${token}` };
   }, [getAccessToken]);
 
-  const refresh = useCallback(async () => {
+  const loadData = useCallback(async () => {
     if (!authenticated) { setEligibility("unauthenticated"); return; }
-    setEligibility("loading"); setNotice("");
+    setEligibility("loading"); setComputeState("loading"); setModelsState("loading"); setNotice("");
     try {
       const headers = await authHeaders();
-      const account = await fetch("/api/account", { headers, cache: "no-store" });
-      if (!account.ok) throw new Error();
-      const accountData = await account.json() as { account: { walletAddress: string }; eligibility?: { state: string } | null; compute?: { available: string } };
-      setWallet(accountData.account.walletAddress);
-      const verification = await fetch("/api/holder/verify", { method: "POST", headers });
-      if (!verification.ok) { setEligibility(verification.status === 401 ? "unauthenticated" : "verification_error"); return; }
-      const result = await verification.json() as { eligibility: { state: string; chain_id?: number } };
-      if (result.eligibility.state === "eligible") {
-        setEligibility("eligible");
-        const allowance = await fetch("/api/allowance", { headers });
-        if (allowance.ok) { const data = await allowance.json() as { balance?: { available: string } }; setBalance((Number(data.balance?.available ?? 0) / 1_000_000).toFixed(2)); }
-      } else if (result.eligibility.state === "insufficient_balance") setEligibility("insufficient_balance");
-      else if (result.eligibility.state === "wrong_wallet") setEligibility("wrong_network");
-      else setEligibility("verification_error");
-    } catch { setEligibility("verification_error"); setNotice("Verification is temporarily unavailable. Retry before access is enabled."); }
+      const accountResponse = await fetch("/api/account", { headers, cache: "no-store" });
+      if (!accountResponse.ok) throw new Error("ACCOUNT_UNAVAILABLE");
+      const account = await accountResponse.json() as { account: { walletAddress: string } };
+      setWallet(account.account.walletAddress);
+      const verificationResponse = await fetch("/api/holder/verify", { method: "POST", headers });
+      if (!verificationResponse.ok) { setEligibility(verificationResponse.status === 401 ? "unauthenticated" : "verification_error"); setComputeState("idle"); setModelsState("idle"); return; }
+      const verification = await verificationResponse.json() as { eligibility: { state: string } };
+      if (verification.eligibility.state !== "eligible") {
+        setEligibility(verification.eligibility.state === "insufficient_balance" ? "insufficient_balance" : verification.eligibility.state === "wrong_wallet" ? "wrong_network" : "verification_error");
+        setComputeState("idle"); setModelsState("idle"); return;
+      }
+      setEligibility("eligible");
+      const [allowanceResponse, activityResponse, modelsResponse] = await Promise.all([
+        fetch("/api/allowance", { headers, cache: "no-store" }),
+        fetch("/api/activity", { headers, cache: "no-store" }),
+        fetch("/api/models", { headers, cache: "no-store" }),
+      ]);
+      if (!allowanceResponse.ok || !activityResponse.ok) setComputeState("error");
+      else {
+        const allowance = await allowanceResponse.json() as { balance?: { available?: string } };
+        const activityData = await activityResponse.json() as { activity?: Activity[] };
+        setBalanceMicroUsd(allowance.balance?.available ?? "0");
+        setActivity(activityData.activity ?? []); setComputeState("ready");
+      }
+      if (!modelsResponse.ok) setModelsState("error");
+      else { const modelData = await modelsResponse.json() as { models?: Model[] }; setModels(modelData.models ?? []); setModelsState("ready"); }
+    } catch {
+      setEligibility((current) => current === "loading" ? "verification_error" : current);
+      setComputeState("error"); setModelsState("error");
+      setNotice("The access layer is temporarily unavailable. Retry to request a fresh verification.");
+    }
   }, [authenticated, authHeaders]);
 
-  const loadConversations = useCallback(async () => {
-    if (!authenticated) return;
+  const closeModelDetails = useCallback(() => { setSelectedModel(null); setCopyFeedback(""); }, []);
+  const copyModelId = useCallback(async () => {
+    if (!selectedModel?.canonicalProviderModelId) return;
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(selectedModel.canonicalProviderModelId);
+      setCopyFeedback("Copied");
+    } catch {
+      setCopyFeedback("Copy unavailable — select the ID above to copy it manually.");
+    }
+  }, [selectedModel]);
+  const useSelectedModel = useCallback(async () => {
+    if (!selectedModel || eligibility !== "eligible" || clampMicroUsd(balanceMicroUsd) <= 0n) return;
     try {
       const headers = await authHeaders();
-      const res = await fetch("/api/conversations", { headers, cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json() as { conversations: Array<{ id: string; title: string | null; updated_at: string; message_count: number }> };
-      const loaded: Conversation[] = data.conversations.map((c) => ({ id: c.id, title: c.title || "New conversation", date: relativeTime(c.updated_at), messages: [], loaded: false }));
-      setConversations(loaded.length ? loaded : [draft()]);
-      setSelected(0);
-    } catch { /* keep current state on failure */ }
-  }, [authenticated, authHeaders]);
-
-  const loadMessages = useCallback(async (conversationId: string, index: number) => {
-    try {
-      const headers = await authHeaders();
-      const res = await fetch(`/api/conversations/${conversationId}`, { headers, cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json() as { messages: Array<{ role: "user" | "assistant"; content: string; partial: boolean; model_slug: string | null }> };
-      const messages: Message[] = data.messages.map((m) => ({ role: m.role, text: m.content, partial: m.partial, model: m.model_slug ?? undefined }));
-      setConversations((items) => items.map((item, i) => i === index ? { ...item, messages, loaded: true } : item));
-    } catch { /* leave unloaded; will retry on next select */ }
-  }, [authHeaders]);
+      const response = await fetch("/api/models", { headers, cache: "no-store" });
+      if (!response.ok) throw new Error("MODELS_UNAVAILABLE");
+      const data = await response.json() as { models?: Model[] };
+      const latest = data.models?.find((model) => model.id === selectedModel.id);
+      const operational = latest && latest.availability === "available" && latest.syncStatus === "current" && latest.registryStatus === "active";
+      if (!operational) {
+        setSelectedModel(latest ?? { ...selectedModel, availability: "unavailable", syncStatus: "unavailable" });
+        setNotice("This model is no longer available. No billable request was started.");
+        return;
+      }
+      closeModelDetails();
+      router.push(`/chat?model=${encodeURIComponent(latest.id)}`);
+    } catch {
+      setNotice("Model availability could not be confirmed. No billable request was started.");
+    }
+  }, [authHeaders, balanceMicroUsd, closeModelDetails, eligibility, router, selectedModel]);
 
   useEffect(() => { if (ready && !authenticated) router.replace("/signup"); }, [ready, authenticated, router]);
-  useEffect(() => { if (ready && authenticated) void refresh(); }, [ready, authenticated, refresh]);
-  useEffect(() => { if (ready && authenticated) void loadConversations(); }, [ready, authenticated, loadConversations]);
+  useEffect(() => { if (ready && authenticated) void loadData(); }, [ready, authenticated, loadData]);
   useEffect(() => {
-    const c = conversations[selected];
-    if (c?.id && !c.loaded) void loadMessages(c.id, selected);
-  }, [selected, conversations, loadMessages]);
-  useEffect(() => { messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight }); }, [streamingText, current?.messages.length, selected]);
-  useEffect(() => {
-    if (confirmDelete === null) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setConfirmDelete(null); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [confirmDelete]);
+    if (!selectedModel) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") closeModelDetails(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [closeModelDetails, selectedModel]);
 
-  async function selectConversation(index: number) { setSelected(index); setView("chat"); }
+  if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large">✦</span><p>{ready ? "Redirecting to sign in…" : "Verifying your session…"}</p></div></main>;
 
-  async function performDelete(index: number) {
-    const target = conversations[index];
-    setConfirmDelete(null);
-    setConversations((items) => { const next = items.filter((_, i) => i !== index); return next.length ? next : [draft()]; });
-    setSelected((s) => (index < s ? s - 1 : Math.max(0, index === s ? index - 1 : s)));
-    if (!target?.id) return;
-    try {
-      const headers = await authHeaders();
-      const res = await fetch(`/api/conversations/${target.id}`, { method: "DELETE", headers });
-      if (!res.ok && res.status !== 404) { setNotice("Could not delete the conversation on the server. It may reappear on reload."); return; }
-      setNotice("Conversation deleted.");
-    } catch { setNotice("Could not reach the server to delete the conversation."); }
-  }
+  const statusLabel: Record<Eligibility, string> = { loading: "VERIFYING", eligible: "ELIGIBLE", insufficient_balance: "NOT ELIGIBLE", wrong_network: "WRONG NETWORK", verification_error: "AUTH DEGRADED", unauthenticated: "AUTH REQUIRED" };
+  const gated = eligibility !== "eligible";
+  const hasDataError = computeState === "error" || modelsState === "error";
+  const balanceAvailable = clampMicroUsd(balanceMicroUsd) > 0n;
 
-  const loadActivity = useCallback(async () => {
-    setActivityState("loading");
-    try {
-      const headers = await authHeaders();
-      const res = await fetch("/api/activity", { headers, cache: "no-store" });
-      if (!res.ok) { setActivityState("error"); return; }
-      const data = await res.json() as { activity: Activity[] };
-      setActivity(data.activity); setActivityState("ready");
-    } catch { setActivityState("error"); }
-  }, [authHeaders]);
-
-  function openCompute() { setView("compute"); void loadActivity(); }
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!prompt.trim() || streaming) { if (!prompt.trim()) setNotice("Enter a message before submitting."); return; }
-    if (eligibility !== "eligible") { setNotice(eligibility === "insufficient_balance" ? "Holder eligibility is required before frontier access." : "Verification must complete before access is enabled."); return; }
-    setStreaming(true); setStreamingText(""); setNotice(""); const text = prompt.trim(); setPrompt("");
-    const conversationId = current?.id;
-    setConversations((items) => items.map((item, index) => index === selected ? { ...item, title: item.messages.length ? item.title : text.slice(0, 42), messages: [...item.messages, { role: "user", text }] } : item));
-    const opKey = crypto.randomUUID(); setActiveOp(opKey);
-    try {
-      const headers = await authHeaders();
-      const response = await fetch("/api/chat", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ message: text, model, conversationId, operationKey: opKey }) });
-      if (!response.ok || !response.body) throw new Error();
-      const reader = response.body.getReader(); const decoder = new TextDecoder(); let output = ""; let buffer = ""; let newId: string | undefined; let lastPaint = 0;
-      while (true) {
-        const { done, value } = await reader.read(); if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const raw = trimmed.slice(5).trim();
-          if (!raw) continue;
-          const event = JSON.parse(raw) as { type: string; text?: string; error?: string; conversationId?: string };
-          if (event.type === "delta") {
-            output += event.text ?? "";
-            const now = Date.now();
-            if (now - lastPaint > 50) { lastPaint = now; setStreamingText(output); }
-          }
-          if ((event.type === "complete" || event.type === "cancelled") && event.conversationId) newId = event.conversationId;
-          if (event.type === "error") throw new Error(event.error);
-        }
-      }
-      setConversations((items) => items.map((item, index) => index === selected ? { ...item, id: item.id ?? newId, loaded: true, date: "Just now", messages: [...item.messages, { role: "assistant", text: output || "No response content was returned.", model }] } : item));
-      setStreaming(false); setStreamingText("");
-      void refresh();
-    } catch { setNotice("The response could not be completed. Retry with a new request; no unsafe client-side charge was applied."); }
-    finally { setStreaming(false); setStreamingText(""); }
-  }
-  async function stop() { setNotice("Stop requested · any persisted partial output remains in conversation history."); const op = activeOp; if (op) { try { const headers = await authHeaders(); await fetch("/api/inference/stop", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ operationKey: op }) }); } catch { /* best effort */ } } }
-  const statusText = { loading: "VERIFYING", eligible: "ELIGIBLE", insufficient_balance: "NOT ELIGIBLE", wrong_network: "WRONG NETWORK", verification_error: "VERIFICATION ERROR", unauthenticated: "AUTHENTICATION REQUIRED" }[eligibility];
-
-  function newConversation() { setConversations((items) => [draft(), ...items]); setSelected(0); setView("chat"); }
-
-  if (!ready || !authenticated) {
-    return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large">✦</span><p>{ready ? "Redirecting to sign in…" : "Verifying your session…"}</p></div></main>;
-  }
-
-  return <main className="dashboard"><aside className="sidebar"><div className="brand"><span className="mark">✦</span> OPENWEIGHT</div><div className="eyebrow">OPEN-WEIGHT FRONTIER</div><nav><a className={view === "chat" ? "active" : ""} href="#chat" onClick={(e) => { e.preventDefault(); setView("chat"); }}>◌ <span>Workspace</span></a><a className={view === "compute" ? "active" : ""} href="#compute" onClick={(e) => { e.preventDefault(); openCompute(); }}>◉ <span>Compute activity</span></a></nav><div className="side-status"><span className="dot" /> {statusText}<br/><small>{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "No canonical wallet"}</small></div><button className="exit" onClick={() => void logout()}>Sign out ↗</button></aside><section className="main"><header className="mobile-head"><span className="brand">OPENWEIGHT</span><span className="dot" /></header><header className="topbar"><div><div className="eyebrow">WORKSPACE / ACCESS + COMPUTE LAYER</div><h1>Think with the open-weight<br/><em>frontier.</em></h1><p>Ownership establishes eligibility, and the access layer keeps the work focused while compute remains visible and bounded.</p></div><div className="balance"><span>AVAILABLE COMPUTE</span><b>${balance}</b><button onClick={() => { void refresh(); if (view === "compute") void loadActivity(); }}>Refresh status ↻</button></div></header><div className="workspace"><section className="history panel"><button className="new-chat" onClick={newConversation}>＋ New conversation</button><label className="search">⌕ <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search history"/></label><div className="history-list">{filtered.map((item) => { const index = conversations.indexOf(item); return <div key={(item.id ?? item.title) + index} className={`history-item ${item === current && view === "chat" ? "selected" : ""}`}><button className="history-open" onClick={() => void selectConversation(index)}><span>{item.title}</span><small>{item.date}</small></button><button className="history-delete" aria-label={`Delete ${item.title}`} title="Delete conversation" onClick={() => setConfirmDelete(index)}>🗑</button></div>; })}</div></section>{view === "compute" ? <section className="chat panel" id="compute"><div className="chat-head"><span>OPENWEIGHT / COMPUTE ACTIVITY</span><button className="ghost" onClick={() => void loadActivity()}>Reload ↻</button></div><div className="activity">{activityState === "loading" ? <p className="muted">Loading compute activity…</p> : activityState === "error" ? <div className="welcome"><span className="mark large">⚠</span><h2>Couldn’t load compute activity</h2><p>The activity service didn’t respond. This is usually transient.</p><div className="suggestions"><button onClick={() => void loadActivity()}>Retry ↻</button></div></div> : !activity || activity.length === 0 ? <div className="welcome"><span className="mark large">◉</span><h2>No compute activity yet</h2><p>Your open-weight sessions will appear here with a clear record of usage.</p></div> : <table className="activity-table"><thead><tr><th>When</th><th>Model</th><th>Status</th><th>In / Out</th><th>Compute</th><th>Allowance use</th></tr></thead><tbody>{activity.map((a) => <tr key={a.operation_key}><td>{relativeTime(a.created_at)}</td><td>{labels[a.model] ?? a.model}</td><td><span className={`pill ${a.status}`}>{a.status}</span></td><td>{a.input_tokens ?? "—"} / {a.output_tokens ?? "—"}</td><td>{usd(a.provider_cost_micro_usd)}</td><td>{usd(a.user_debit_micro_usd)}</td></tr>)}</tbody></table>}</div></section> : <section className="chat panel" id="chat"><div className="chat-head"><span>OPENWEIGHT / CHAT</span><span className={`eligible ${eligibility !== "eligible" ? "degraded" : ""}`}><i/> {statusText}</span></div><div className="messages" ref={messagesRef}>{current.messages.length === 0 && !streaming ? <div className="welcome"><span className="mark large">✦</span><h2>What are you working on?</h2><p>{eligibility === "eligible" ? "Bring a question to the open-weight frontier." : eligibility === "loading" ? "Checking your authenticated account and holder status…" : "Chat remains locked until server verification confirms eligibility."}</p><div className="suggestions"><button onClick={() => setPrompt("Compare the trade-offs in my current plan")}>Compare a plan ↗</button><button onClick={() => setPrompt("Summarize research on open models")}>Summarize research ↗</button></div></div> : current.messages.map((message, index) => <article className={message.role} key={index}><span>{message.role === "user" ? "YOU" : `OPENWEIGHT · ${(labels[message.model ?? model] ?? "MODEL").toUpperCase()}`}</span>{message.role === "assistant" ? <>{<Markdown text={message.text} />}{message.partial && <small className="partial"> · partial</small>}</> : <p>{message.text}</p>}</article>)}{streaming && <article className="assistant streaming"><span>OPENWEIGHT · {(labels[model] ?? "MODEL").toUpperCase()}</span>{streamingText ? <Markdown text={streamingText} /> : <p className="typing">● ● ●</p>}<button onClick={stop}>■ Stop response</button></article>}</div><form className="composer" onSubmit={submit}><select aria-label="Select approved model" value={model} onChange={(e) => setModel(e.target.value)}><option value="auto">Frontier selection</option>{models.map((item) => <option key={item} value={item}>{labels[item]}</option>)}</select><input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Message Openweight..." aria-label="Message Openweight"/><button type="submit" disabled={!prompt.trim() || streaming || eligibility !== "eligible"}>↑</button><small>{labels[model] ?? "Frontier selection"} · compute tracked</small></form>{notice && <div className="notice" role="status">{notice}</div>}</section>}</div></section>{confirmDelete !== null && (() => {
-  const target = conversations[confirmDelete]; if (!target) return null;
-  const scrim: CSSProperties = { position: "fixed", inset: 0, background: "rgba(20,20,24,.55)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 };
-  const card: CSSProperties = { background: "#fff", border: "1px solid #e4e4e7", borderRadius: 14, width: "100%", maxWidth: 380, padding: 24, boxShadow: "0 20px 50px rgba(0,0,0,.28)", fontFamily: "inherit" };
-  const btn: CSSProperties = { minHeight: 38, padding: "0 16px", borderRadius: 999, fontSize: 13, cursor: "pointer", fontFamily: "inherit" };
-  return <div role="dialog" aria-modal="true" style={scrim} onClick={() => setConfirmDelete(null)}>
-    <div style={card} onClick={(e) => e.stopPropagation()}>
-      <h3 style={{ fontSize: 17, fontWeight: 600, margin: "0 0 8px", color: "#171719" }}>Delete conversation?</h3>
-      <p style={{ color: "#73757b", fontSize: 13.5, lineHeight: 1.5, margin: 0 }}>“{target.title}” and all its messages will be permanently removed.</p>
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 22 }}>
-        <button style={{ ...btn, border: "1px solid #dedfe2", background: "#fff", color: "#171719" }} onClick={() => setConfirmDelete(null)}>Cancel</button>
-        <button style={{ ...btn, border: "1px solid #c14a3b", background: "#c14a3b", color: "#fff" }} onClick={() => void performDelete(confirmDelete)}>Delete</button>
-      </div>
-    </div>
-  </div>;
-})()}</main>;
+  return <main className="compute-dashboard">
+    <aside className="compute-sidebar"><div className="compute-brand"><span className="mark">✦</span><span>OPENWEIGHT</span></div><div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div><nav><a className="active" href="#overview">◉ <span>Overview</span></a><a href="/chat">◌ <span>Chat workflow</span></a><a href="/compute">◈ <span>Activity</span></a></nav><div className="compute-sidebar-foot"><div><span className={`compute-dot ${gated ? "muted" : ""}`} /> {statusLabel[eligibility]}</div><small>{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "Canonical wallet pending"}</small><button onClick={() => void logout()}>Sign out ↗</button></div></aside>
+    <section className="compute-main" id="overview"><header className="compute-header"><div><div className="compute-eyebrow">WORKSPACE / COMPUTE LAYER</div><h1>Compute, kept<br/><em>in view.</em></h1><p>A clear allowance and a deliberate set of open-weight models, ready when your verified access is active.</p></div><div className="compute-header-actions"><span className={`compute-access ${gated ? "degraded" : ""}`}><i /> {statusLabel[eligibility]}</span><button onClick={() => void loadData()}>Refresh ↻</button></div></header>
+      {gated ? <StatusPanel title={eligibility === "insufficient_balance" ? "Holder access is paused" : eligibility === "wrong_network" ? "Verify on the configured network" : eligibility === "loading" ? "Checking access" : eligibility === "unauthenticated" ? "Authentication required" : "Verification is delayed"} body={eligibility === "insufficient_balance" ? "A qualifying balance is required before compute and model information can be shown." : eligibility === "wrong_network" ? "Switch to the configured wallet and network, then retry verification." : eligibility === "loading" ? "We are checking your authenticated account and holder status." : eligibility === "unauthenticated" ? "Sign in again to verify access to this workspace." : "The verification service did not respond. Your access remains paused until it completes."} action={<button className="compute-retry" onClick={() => void loadData()}>Retry verification ↻</button>} /> : computeState === "loading" || modelsState === "loading" ? <StatusPanel title="Loading compute allowance" body="Fetching your current server ledger balance and approved model catalog. No inference access is assumed until the balance is confirmed." /> : hasDataError ? <StatusPanel title="Workspace data is unavailable" body="Compute and model information could not be loaded from the server. No balance or catalog is shown until the data is authoritative." action={<button className="compute-retry" onClick={() => void loadData()}>Retry loading ↻</button>} /> : <>
+        <section className={`compute-overview-grid ${balanceAvailable ? "" : "compute-overview-insufficient"}`}><article className="compute-balance-card"><div className="compute-card-label">REMAINING COMPUTE ALLOWANCE</div><strong>{formatMicroUsd(balanceMicroUsd)}</strong><p>{balanceAvailable ? "Available internal USD compute · actual provider cost" : "Zero / insufficient compute · inference is not authorized"}</p><div className="compute-balance-rule"><span /> <small>{balanceAvailable ? "Server ledger balance · reservations reflected" : "Add available allowance before starting inference"}</small></div></article><article className="compute-note-card"><div className="compute-card-label">HOW IT WORKS</div><h2>One allowance.<br/><em>No provider setup.</em></h2><p>Choose from the curated registry or continue through the existing chat workflow. Provider credentials never enter your journey.</p></article></section>
+        <section className="compute-section"><div className="compute-section-head"><div><div className="compute-card-label">APPROVED OPEN-WEIGHT MODELS</div><h2>Discover a model for the work.</h2>{!balanceAvailable && <p className="compute-insufficient-note">Catalog shown for reference only. Inference stays unavailable until compute is available.</p>}</div><a href="/models">View registry ↗</a></div>{models.length === 0 ? <div className="models-empty">No approved active models are available right now. Refresh to check the curated registry again.</div> : <div className="compute-model-grid">{models.map((model) => <ModelCard key={model.id} model={model} canUse={balanceAvailable} onOpen={setSelectedModel} />)}</div>}</section>
+        <section className="compute-section activity-section"><div className="compute-section-head"><div><div className="compute-card-label">RECENT USAGE</div><h2>Compute activity</h2></div><a href="/compute">Full activity ↗</a></div>{activity.length === 0 ? <p className="compute-empty">No settled compute activity yet.</p> : <div className="compute-activity-list">{activity.slice(0, 4).map((item) => <div className="compute-activity-row" key={item.operation_key}><span className="activity-status"><i /></span><span><b>{item.model}</b><small>{relativeTime(item.created_at)} · {item.input_tokens ?? "—"} in / {item.output_tokens ?? "—"} out</small></span><strong>{compactUsd(item.user_debit_micro_usd)}</strong></div>)}</div>}</section>
+      </>}{notice && <p className="compute-notice" role="status">{notice}</p>}</section>
+    {selectedModel && <ModelDetails model={selectedModel} canUse={balanceAvailable && eligibility === "eligible"} onClose={closeModelDetails} onUse={() => void useSelectedModel()} onCopy={() => void copyModelId()} />}
+    {copyFeedback && selectedModel && <div className="model-copy-feedback" role="status">{copyFeedback}</div>}
+  </main>;
 }

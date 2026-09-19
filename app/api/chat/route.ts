@@ -5,7 +5,7 @@ import { reserveCompute, settleReservation, AccountingError } from "../../../lib
 import { query } from "../../../lib/server/db";
 import { rateLimit, cacheGet } from "../../../lib/server/redis";
 import { OpenRouterProvider } from "../../../lib/server/openrouter";
-import { getActiveModel, pickAutoModel, type ModelRow } from "../../../lib/server/models";
+import { getActiveModel, pickAutoModel, syncCuratedModels, type ModelRow } from "../../../lib/server/models";
 import { computeUserDebit, modelPolicy } from "../../../lib/server/pricing";
 import { pricingConfig } from "../../../lib/server/config";
 import { ensureMigrated } from "../../../lib/server/migrate";
@@ -25,7 +25,9 @@ export async function POST(request: Request) {
     const text = body.message?.trim();
     if (!text) return NextResponse.json({ error: "Message cannot be empty", code: "INVALID_REQUEST", requestId }, { status: 400 });
 
-    // Resolve the requested model against the approved registry (PRD §12, §13).
+    // Refresh provider availability before resolving either explicit or auto
+    // selection. A removed provider model must not remain selectable from cache.
+    await syncCuratedModels();
     const requestedSlug = body.model?.trim();
     const model: ModelRow | null = !requestedSlug || requestedSlug === "auto" ? await pickAutoModel() : await getActiveModel(requestedSlug);
     if (!model) return NextResponse.json({ error: "That model is not available", code: "UNAVAILABLE_MODEL", requestId }, { status: 400 });
@@ -37,30 +39,22 @@ export async function POST(request: Request) {
     // Derive a human-readable title from the first user message so history is
     // legible instead of every row reading "Untitled conversation".
     const derivedTitle = text.slice(0, 60);
-    // Resolve / verify conversation ownership, seeding the title on creation.
     const conversationId = body.conversationId ?? (await query<{ id: string }>(`INSERT INTO conversations (account_id, title) VALUES ($1,$2) RETURNING id`, [account.accountId, derivedTitle]))[0].id;
     const owned = await query(`SELECT id FROM conversations WHERE id=$1 AND account_id=$2`, [conversationId, account.accountId]);
     if (!owned.length) return NextResponse.json({ error: "Conversation not found", code: "NOT_FOUND", requestId }, { status: 404 });
-    // Backfill the title if an existing conversation is still on the default.
     if (body.conversationId) await query(`UPDATE conversations SET title=$3 WHERE id=$1 AND account_id=$2 AND (title IS NULL OR title IN ('Untitled conversation','New conversation'))`, [conversationId, account.accountId, derivedTitle]);
 
     const operationKey = body.operationKey ?? body.clientRequestId ?? requestId;
-
-    // Build server-side context from persisted history (PRD §16.3).
     const priorRows = await query<{ role: "user" | "assistant"; content: string }>(
       `SELECT role, content FROM messages WHERE conversation_id=$1 AND partial=false ORDER BY created_at ASC LIMIT $2`,
       [conversationId, CONTEXT_LIMIT]
     );
-    // Steer language explicitly: open-weight models like GLM default to Chinese
-    // without a system prompt. Match the user's language, defaulting to English.
     const systemPrompt: InferenceMessage = {
       role: "system",
-      content:
-        "You are Openweight, a helpful AI assistant. Always respond in the same language the user writes in. If the user's language is unclear, respond in English. Do not default to Chinese.",
+      content: "You are Openweight, a helpful AI assistant. Always respond in the same language the user writes in. If the user's language is unclear, respond in English. Do not default to Chinese.",
     };
     const contextMessages: InferenceMessage[] = [systemPrompt, ...priorRows.map(r => ({ role: r.role, content: r.content })), { role: "user", content: text }];
 
-    // Persist the user message and open an inference record.
     await query(`INSERT INTO messages (conversation_id,account_id,role,content) VALUES ($1,$2,'user',$3)`, [conversationId, account.accountId, text]);
     const cfg = pricingConfig();
     const policy = modelPolicy(model);
@@ -70,7 +64,6 @@ export async function POST(request: Request) {
       [account.accountId, operationKey, model.provider, model.slug, model.provider_model_slug, conversationId, policy.markupMicro.toString(), JSON.stringify({ requestId })]
     );
 
-    // Reserve a safety cap; fails if the user lacks balance (PRD §7.7, §9.4).
     try {
       await reserveCompute(account.accountId, operationKey, cfg.reservationCapMicroUsd);
     } catch (e) {
@@ -118,7 +111,6 @@ export async function POST(request: Request) {
             if (chunk.type === "delta") {
               output += chunk.text; deltas += 1;
               send({ type: "delta", text: chunk.text });
-              // Cooperative cancellation via a shared stop flag (PRD §7.11, §28.5).
               if (deltas % 20 === 0) {
                 const stop = await cacheGet<boolean>(`stop:${operationKey}`).catch(() => null);
                 if (stop) { stopRequested = true; break; }

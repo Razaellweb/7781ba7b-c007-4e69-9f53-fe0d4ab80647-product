@@ -21,7 +21,7 @@ export async function GET(request: Request) {
     if (!eligible.length) return NextResponse.json({ error: "Fresh holder eligibility is required", code: "NOT_ELIGIBLE" }, { status: 403 });
     const { start, end } = currentPeriod();
     await issueGrant(account.accountId, start, end);
-    const balance = await query(`SELECT COALESCE(SUM(CASE WHEN entry_type IN ('grant','release','refund') THEN amount_micro_usd WHEN entry_type IN ('reservation','user_debit') THEN -amount_micro_usd ELSE 0 END),0)::text available FROM compute_ledger_entries WHERE account_id=$1`, [account.accountId]);
+    const balance = await query(`SELECT GREATEST(COALESCE(SUM(CASE WHEN entry_type IN ('grant','release','refund') THEN amount_micro_usd WHEN entry_type IN ('reservation','user_debit') THEN -amount_micro_usd ELSE 0 END),0),0)::text available FROM compute_ledger_entries WHERE account_id=$1`, [account.accountId]);
     const grant = await query(`SELECT amount_micro_usd, period_start, period_end FROM compute_grants WHERE account_id=$1 AND period_end > now() ORDER BY period_end DESC LIMIT 1`, [account.accountId]);
     return NextResponse.json({ balance: balance[0] ?? { available: "0" }, allowance: grant[0] ?? null });
   } catch (error) {
