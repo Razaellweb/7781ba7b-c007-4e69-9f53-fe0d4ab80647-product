@@ -43,6 +43,8 @@ export class OpenRouterProvider implements InferenceProvider {
     if (request.parameters?.top_p !== undefined) payload.top_p = request.parameters.top_p;
     if (request.parameters?.max_tokens !== undefined) payload.max_tokens = request.parameters.max_tokens;
     if (request.parameters?.max_completion_tokens !== undefined) payload.max_completion_tokens = request.parameters.max_completion_tokens;
+    if (request.parameters?.seed !== undefined) payload.seed = request.parameters.seed;
+    if (request.parameters?.stop?.length) payload.stop = request.parameters.stop;
     try {
       response = await fetch(`${config.baseUrl}/chat/completions`, { method: "POST", headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://openweight.systems", "X-Title": "Openweight" }, body: JSON.stringify(payload), signal: timeoutController.signal });
     } catch (caught) {
@@ -83,4 +85,4 @@ export class OpenRouterProvider implements InferenceProvider {
   async cancel(_operationKey: string) { return; }
 }
 
-export async function getInferenceHealth(): Promise<InferenceHealth> { return new OpenRouterProvider().health(); } 
+export async function getInferenceHealth(): Promise<InferenceHealth> { return new OpenRouterProvider().health(); }

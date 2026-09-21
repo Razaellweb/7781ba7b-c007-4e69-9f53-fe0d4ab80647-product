@@ -1,10 +1,13 @@
 export type InferenceMessage = { role: "system" | "user" | "assistant"; content: string };
 
 export type CompletionParameters = {
+  systemPrompt?: string;
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
   max_completion_tokens?: number;
+  seed?: number;
+  stop?: string[];
 };
 
 export type InferenceRequest = {
