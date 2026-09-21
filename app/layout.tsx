@@ -4,6 +4,7 @@ import "./globals.css";
 import "./landing-transition.css";
 import "./brand.css";
 import "./app-system.css";
+import "./coverage.css";
 import Providers from "./providers";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
