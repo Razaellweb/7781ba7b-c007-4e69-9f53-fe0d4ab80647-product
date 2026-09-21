@@ -8,8 +8,9 @@ export async function POST(request: Request) {
   try {
     await ensureMigrated();
     const account = await authenticatePrivyRequest(request.headers.get("authorization"));
-    if (!(await rateLimit(`holder:${account.accountId}`, 12, 60))) return NextResponse.json({ error: "Too many verification attempts. Try again shortly.", code: "RATE_LIMITED" }, { status: 429 });
-    const result = await verifyHolder(account);
+    const force = new URL(request.url).searchParams.get("force") === "true";
+    if (!(await rateLimit(`holder:${account.accountId}`, force ? 3 : 12, 60))) return NextResponse.json({ error: "Too many verification attempts. Try again shortly.", code: "RATE_LIMITED" }, { status: 429 });
+    const result = await verifyHolder(account, { force });
     return NextResponse.json({ eligibility: result });
   } catch (error) {
     if (error instanceof AuthenticationError) return NextResponse.json({ error: error.message, code: error.code }, { status: 401 });

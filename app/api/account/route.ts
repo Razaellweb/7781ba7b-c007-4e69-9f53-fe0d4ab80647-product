@@ -20,7 +20,7 @@ export async function GET(request: Request) {
       [account.accountId]
     );
     const holder = eligibility[0]
-      ? { state: eligibility[0].state, eligible: eligibility[0].state === "eligible", chainId: eligibility[0].chain_id, balanceRaw: eligibility[0].balance_raw, thresholdRaw: eligibility[0].threshold_raw, tokenDecimals: eligibility[0].token_decimals, verifiedAt: eligibility[0].verified_at }
+      ? { state: eligibility[0].state, eligible: eligibility[0].state === "eligible", walletAddress: eligibility[0].wallet_address, chainId: eligibility[0].chain_id, balanceRaw: eligibility[0].balance_raw, thresholdRaw: eligibility[0].threshold_raw, tokenDecimals: eligibility[0].token_decimals, verifiedAt: eligibility[0].verified_at }
       : null;
     return NextResponse.json({ account, holder, eligibility: eligibility[0] ?? null, compute: balance[0] ?? { available: "0", reserved: "0" } });
   } catch (error) {
