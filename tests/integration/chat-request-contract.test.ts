@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseBody } from "../../app/api/v1/chat/completions/route";
+import { parseBody } from "../../lib/server/chat-request";
 
 const message = { role: "user", content: "hello" };
 
