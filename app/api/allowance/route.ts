@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticatePrivyRequest, AuthenticationError } from "../../../lib/server/auth";
-import { issueGrant } from "../../../lib/server/accounting";
+import { AccountingError, issueGrant } from "../../../lib/server/accounting";
 import { query } from "../../../lib/server/db";
 import { ensureMigrated } from "../../../lib/server/migrate";
 
@@ -26,6 +26,10 @@ export async function GET(request: Request) {
     return NextResponse.json({ balance: balance[0] ?? { available: "0" }, allowance: grant[0] ?? null });
   } catch (error) {
     if (error instanceof AuthenticationError) return NextResponse.json({ error: error.message, code: error.code }, { status: 401 });
+    if (error instanceof AccountingError) {
+      const status = error.code === "HOLDER_VERIFICATION_REQUIRED" ? 403 : 503;
+      return NextResponse.json({ error: error.message, code: error.code }, { status });
+    }
     return NextResponse.json({ error: "Allowance is temporarily unavailable", code: "ALLOWANCE_ERROR" }, { status: 503 });
   }
 }

@@ -1,27 +1,13 @@
 import { query, transaction } from "./db";
-import { openRouterConfig } from "./config";
+import { OpenRouterProvider } from "./openrouter";
 
-export type ProviderPricing = {
-  prompt?: string;
-  completion?: string;
-  input_cache_read?: string;
-  input_cache_write?: string;
-  request?: string;
-  image?: string;
-  [key: string]: unknown;
-};
-
-export type ProviderMetadata = {
-  canonicalId: string;
-  pricing: ProviderPricing;
+type ProviderMetadata = {
   contextLength: number | null;
-  architecture: Record<string, unknown> | null;
-  inputModalities: string[];
-  outputModalities: string[];
+  pricing: Record<string, string>;
+  architecture: { inputModalities: string[]; outputModalities: string[] };
   supportedParameters: string[];
   availability: "available" | "unavailable" | "stale";
   syncedAt: string | null;
-  providerFields: Record<string, unknown>;
 };
 
 export type ModelRow = {
@@ -42,62 +28,23 @@ export type ModelRow = {
   provider_sync_error: string | null;
 };
 
-type OpenRouterModel = {
-  id: string;
-  context_length?: unknown;
-  architecture?: unknown;
-  pricing?: unknown;
-  supported_parameters?: unknown;
-  [key: string]: unknown;
-};
-
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function validatedPricing(value: unknown): ProviderPricing {
+function parseMetadata(value: unknown): ProviderMetadata | null {
   const raw = objectValue(value);
-  if (!raw) return {};
-  const pricing: ProviderPricing = {};
-  for (const [key, item] of Object.entries(raw)) {
-    if (typeof item === "string" && /^-?\d+(\.\d+)?$/.test(item)) pricing[key] = item;
-  }
-  return pricing;
-}
-
-function normalizeProviderModel(model: OpenRouterModel, syncedAt: string): ProviderMetadata | null {
-  if (typeof model.id !== "string" || !model.id.trim()) return null;
-  const architecture = objectValue(model.architecture);
-  const contextLength = typeof model.context_length === "number" && Number.isSafeInteger(model.context_length) && model.context_length > 0 ? model.context_length : null;
+  if (!raw || typeof raw.contextLength !== "number" && raw.contextLength !== null) return null;
+  const architecture = objectValue(raw.architecture);
+  const strings = (candidate: unknown) => Array.isArray(candidate) ? candidate.filter((item): item is string => typeof item === "string") : [];
   return {
-    canonicalId: model.id,
-    pricing: validatedPricing(model.pricing),
-    contextLength,
-    architecture,
-    inputModalities: stringArray(architecture?.input_modalities),
-    outputModalities: stringArray(architecture?.output_modalities),
-    supportedParameters: stringArray(model.supported_parameters),
-    availability: "available",
-    syncedAt,
-    providerFields: Object.fromEntries(Object.entries(model).filter(([key]) => !["id", "pricing", "context_length", "architecture", "supported_parameters"].includes(key))),
+    contextLength: raw.contextLength as number | null,
+    pricing: objectValue(raw.pricing) as Record<string, string> ?? {},
+    architecture: { inputModalities: strings(architecture?.inputModalities), outputModalities: strings(architecture?.outputModalities) },
+    supportedParameters: strings(raw.supportedParameters),
+    availability: raw.availability === "available" || raw.availability === "stale" ? raw.availability : "unavailable",
+    syncedAt: typeof raw.syncedAt === "string" ? raw.syncedAt : null,
   };
-}
-
-// Read-only server-side integration point. It returns validated provider data
-// but never writes to the registry or exposes the OpenRouter credential.
-export async function fetchOpenRouterCatalog(): Promise<OpenRouterModel[]> {
-  const config = openRouterConfig();
-  if (!config.enabled) throw new Error("OpenRouter synchronization is not enabled");
-  const response = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` }, cache: "no-store" });
-  if (!response.ok) throw new Error(`OpenRouter models request failed (${response.status})`);
-  const payload: unknown = await response.json();
-  const root = objectValue(payload);
-  if (!root || !Array.isArray(root.data)) throw new Error("OpenRouter models response was malformed");
-  return root.data.filter((item): item is OpenRouterModel => objectValue(item) !== null && typeof (item as Record<string, unknown>).id === "string");
 }
 
 function modelSelect(): string {
@@ -107,19 +54,18 @@ function modelSelect(): string {
     FROM models`;
 }
 
-function parseMetadata(value: unknown): ProviderMetadata | null {
-  const raw = objectValue(value);
-  if (!raw || typeof raw.canonicalId !== "string") return null;
-  return raw as unknown as ProviderMetadata;
+async function selectModels(where: string, values: unknown[] = []): Promise<ModelRow[]> {
+  const rows = await query<ModelRow>(`${modelSelect()} WHERE ${where}`, values);
+  return rows.map((row) => ({ ...row, provider_metadata: parseMetadata(row.provider_metadata) }));
 }
 
-// Synchronizes only already-approved curated rows. The curated registry remains
-// the allow-list; provider data cannot create or activate a model.
+// The database registry is the first-party public-ID to internal provider-ID
+// mapping. Provider catalog data is used only to validate approved rows.
 export async function syncCuratedModels(): Promise<{ synced: number; unavailable: number; error?: string }> {
   const syncedAt = new Date().toISOString();
   try {
-    const providerModels = await fetchOpenRouterCatalog();
-    const byId = new Map(providerModels.map((model) => [model.id, model]));
+    const catalog = await new OpenRouterProvider().catalog();
+    const byId = new Map(catalog.map((model) => [model.providerModelId, model]));
     const curated = await query<{ slug: string; provider_model_slug: string }>("SELECT slug, provider_model_slug FROM models WHERE provider = 'openrouter' AND status IN ('active','paused','review')");
     let synced = 0;
     let unavailable = 0;
@@ -130,35 +76,32 @@ export async function syncCuratedModels(): Promise<{ synced: number; unavailable
           unavailable += 1;
           await client.query(`UPDATE models SET provider_sync_status='unavailable', provider_synced_at=$2, provider_sync_error=$3,
             provider_metadata = CASE WHEN provider_metadata IS NULL THEN NULL ELSE jsonb_set(provider_metadata, '{availability}', '"unavailable"'::jsonb) END,
-            updated_at=now() WHERE slug=$1`, [model.slug, syncedAt, "Model was not present in the latest OpenRouter catalog"]);
+            updated_at=now() WHERE slug=$1`, [model.slug, syncedAt, "The approved model is temporarily unavailable"]);
           continue;
         }
-        const metadata = normalizeProviderModel(providerModel, syncedAt);
-        if (!metadata) { unavailable += 1; continue; }
-        await client.query(`UPDATE models SET provider_model_slug=$2, context_length=$3, provider_metadata=$4::jsonb,
-          provider_sync_status='current', provider_synced_at=$5, provider_sync_error=NULL, updated_at=now() WHERE slug=$1`,
-          [model.slug, metadata.canonicalId, metadata.contextLength, JSON.stringify(metadata), syncedAt]);
+        const metadata = {
+          contextLength: providerModel.contextLength,
+          pricing: providerModel.pricing,
+          architecture: providerModel.architecture,
+          supportedParameters: providerModel.supportedParameters,
+          availability: "available",
+          syncedAt,
+        };
+        await client.query(`UPDATE models SET context_length=$2, provider_metadata=$3::jsonb,
+          provider_sync_status='current', provider_synced_at=$4, provider_sync_error=NULL, updated_at=now() WHERE slug=$1`,
+          [model.slug, metadata.contextLength, JSON.stringify(metadata), syncedAt]);
         synced += 1;
       }
     });
     return { synced, unavailable };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "OpenRouter synchronization failed";
+  } catch {
     await query(`UPDATE models SET provider_sync_status = CASE WHEN provider_metadata IS NULL THEN 'unavailable' ELSE 'stale' END,
       provider_sync_error=$1, provider_metadata = CASE WHEN provider_metadata IS NULL THEN NULL ELSE jsonb_set(provider_metadata, '{availability}', '"stale"'::jsonb) END,
-      updated_at=now() WHERE provider='openrouter' AND status IN ('active','paused','review')`, [message]);
-    return { synced: 0, unavailable: 0, error: message };
+      updated_at=now() WHERE provider='openrouter' AND status IN ('active','paused','review')`, ["The model catalog is temporarily unavailable"]);
+    return { synced: 0, unavailable: 0, error: "catalog_unavailable" };
   }
 }
 
-async function selectModels(where: string, values: unknown[] = []): Promise<ModelRow[]> {
-  const rows = await query<ModelRow>(`${modelSelect()} WHERE ${where}`, values);
-  return rows.map((row) => ({ ...row, provider_metadata: parseMetadata(row.provider_metadata) }));
-}
-
-// The curated registry is the allow-list. Provider availability is returned to
-// the UI so unavailable rows can be explained. Inference callers use the two
-// helpers below, which require current provider metadata before billable work.
 export async function listActiveModels(): Promise<ModelRow[]> {
   return selectModels("status = 'active' AND visibility = 'public' ORDER BY sort_order ASC, display_name ASC");
 }

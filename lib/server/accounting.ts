@@ -2,13 +2,14 @@ import { transaction } from "./db";
 import { allowanceConfig } from "./config";
 
 export type MicroUsd = bigint;
-export class AccountingError extends Error { readonly code = "ACCOUNTING_ERROR"; }
+export type AccountingChannel = "app" | "api_key";
+export class AccountingError extends Error { readonly code: string; constructor(message: string, code = "ACCOUNTING_ERROR") { super(message); this.code = code; } }
 
 export async function issueGrant(accountId: string, periodStart: Date, periodEnd: Date) {
   const c = allowanceConfig();
   return transaction(async db => {
     const eligible = await db.query(`SELECT 1 FROM holder_eligibility WHERE account_id=$1 AND state='eligible' AND verified_at > now() - interval '1 second' * $2 ORDER BY verified_at DESC LIMIT 1`, [accountId, 900]);
-    if (!eligible.rowCount) throw new AccountingError("Fresh holder eligibility is required");
+    if (!eligible.rowCount) throw new AccountingError("Fresh holder eligibility is required", "HOLDER_VERIFICATION_REQUIRED");
     const grant = await db.query(`INSERT INTO compute_grants (account_id, amount_micro_usd, period_start, period_end, recurrence_key) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (account_id, recurrence_key) DO NOTHING RETURNING *`, [accountId, c.amountMicroUsd.toString(), periodStart, periodEnd, `${c.recurrence}:${periodStart.toISOString()}`]);
     if (!grant.rowCount) return (await db.query(`SELECT * FROM compute_grants WHERE account_id=$1 AND recurrence_key=$2`, [accountId, `${c.recurrence}:${periodStart.toISOString()}`])).rows[0];
     await db.query(`INSERT INTO compute_ledger_entries (account_id, grant_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'grant',$3,$4,$5)`, [accountId, grant.rows[0].id, c.amountMicroUsd.toString(), `grant:${grant.rows[0].id}`, JSON.stringify({ periodStart, periodEnd })]);
@@ -16,35 +17,37 @@ export async function issueGrant(accountId: string, periodStart: Date, periodEnd
   });
 }
 
-export async function reserveCompute(accountId: string, operationKey: string, estimate: MicroUsd) {
+export async function reserveCompute(accountId: string, operationKey: string, estimate: MicroUsd, options: { apiKeyId?: string; channel?: AccountingChannel } = {}) {
   if (estimate <= 0n) throw new AccountingError("Reservation must be positive");
+  const channel = options.channel ?? (options.apiKeyId ? "api_key" : "app");
   return transaction(async db => {
     const existing = await db.query(`SELECT * FROM compute_reservations WHERE account_id=$1 AND operation_key=$2`, [accountId, operationKey]);
     if (existing.rowCount) return existing.rows[0];
     await db.query(`SELECT id FROM user_accounts WHERE id=$1 FOR UPDATE`, [accountId]);
-    const balance = await db.query<{ available: string }>(`SELECT COALESCE(SUM(CASE WHEN entry_type IN ('grant','release','refund') THEN amount_micro_usd WHEN entry_type IN ('reservation','user_debit') THEN -amount_micro_usd ELSE 0 END),0)::text available FROM compute_ledger_entries WHERE account_id=$1`, [accountId]);
-    if (BigInt(balance.rows[0].available) < estimate) throw new AccountingError("Insufficient available compute");
-    const reservation = await db.query(`INSERT INTO compute_reservations (account_id, operation_key, reserved_micro_usd, status) VALUES ($1,$2,$3,'reserved') RETURNING *`, [accountId, operationKey, estimate.toString()]);
-    await db.query(`INSERT INTO compute_ledger_entries (account_id, reservation_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,$2,'reservation',$3,$4)`, [accountId, reservation.rows[0].id, estimate.toString(), `reserve:${operationKey}`]);
+    const grantState = await db.query<{ active_count: string; expired_count: string }>(`SELECT count(*) FILTER (WHERE period_end > now())::text active_count, count(*) FILTER (WHERE period_end <= now())::text expired_count FROM compute_grants WHERE account_id=$1`, [accountId]);
+    if (grantState.rows[0].active_count === "0") throw new AccountingError(grantState.rows[0].expired_count === "0" ? "No active compute allowance is available" : "Your compute allowance has expired; refresh eligibility to renew it", grantState.rows[0].expired_count === "0" ? "ALLOWANCE_MISSING" : "ALLOWANCE_EXPIRED");
+    const balance = await db.query<{ available: string }>(`SELECT COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`, [accountId]);
+    if (BigInt(balance.rows[0].available) < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
+    const reservation = await db.query(`INSERT INTO compute_reservations (account_id, operation_key, reserved_micro_usd, status, api_key_id, channel) VALUES ($1,$2,$3,'reserved',$4,$5) RETURNING *`, [accountId, operationKey, estimate.toString(), options.apiKeyId ?? null, channel]);
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, reservation_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'reservation',$3,$4,$5)`, [accountId, reservation.rows[0].id, estimate.toString(), `reserve:${operationKey}`, JSON.stringify({ channel, apiKeyId: options.apiKeyId ?? null })]);
     return reservation.rows[0];
   });
 }
 
-export async function settleReservation(operationKey: string, userDebit: MicroUsd, providerCostMicroUsd: MicroUsd | null, uncertain = false) {
+export async function settleReservation(operationKey: string, userDebit: MicroUsd, providerCostMicroUsd: MicroUsd | null, uncertain = false, usage: { inputTokens?: number | null; outputTokens?: number | null; eventType?: "provider_usage" | "provider_failure" | "cancelled" | "partial" | "uncertain"; markupMicro?: bigint } = {}) {
   if (userDebit < 0n) throw new AccountingError("Debit cannot be negative");
   return transaction(async db => {
-    const r = await db.query(`SELECT * FROM compute_reservations WHERE operation_key=$1 FOR UPDATE`, [operationKey]);
+    const r = await db.query(`SELECT r.*, i.id AS inference_id, i.api_key_id AS inference_api_key_id, i.channel AS inference_channel FROM compute_reservations r LEFT JOIN inference_records i ON i.operation_key=r.operation_key WHERE r.operation_key=$1 FOR UPDATE`, [operationKey]);
     if (!r.rowCount) throw new AccountingError("Reservation not found");
-    if (r.rows[0].status !== "reserved") return r.rows[0];
-    const reserved = BigInt(r.rows[0].reserved_micro_usd);
+    const row = r.rows[0];
+    if (row.status !== "reserved") return row;
+    const reserved = BigInt(row.reserved_micro_usd);
     if (userDebit > reserved) throw new AccountingError("Settlement exceeds reservation");
-    // Release the ENTIRE reservation hold, then record the actual debit as its
-    // own ledger event. Net effect across (reservation, release, user_debit) is
-    // exactly -userDebit. (Releasing only reserved-userDebit while also debiting
-    // would double-count the charge.)
-    await db.query(`UPDATE compute_reservations SET status=$2, settled_micro_usd=$3, provider_cost_micro_usd=$4, uncertain=$5, settled_at=now() WHERE id=$1`, [r.rows[0].id, uncertain ? "uncertain" : "settled", userDebit.toString(), providerCostMicroUsd?.toString() ?? null, uncertain]);
-    if (reserved > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key) VALUES ($1,$2,'release',$3,$4)`, [r.rows[0].account_id, r.rows[0].id, reserved.toString(), `release:${operationKey}`]);
-    if (userDebit > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key,metadata) VALUES ($1,$2,'user_debit',$3,$4,$5)`, [r.rows[0].account_id, r.rows[0].id, userDebit.toString(), `debit:${operationKey}`, JSON.stringify({ providerCostMicroUsd: providerCostMicroUsd?.toString() ?? null, uncertain })]);
-    return (await db.query(`SELECT * FROM compute_reservations WHERE id=$1`, [r.rows[0].id])).rows[0];
+    const status = uncertain ? "uncertain" : "settled";
+    await db.query(`UPDATE compute_reservations SET status=$2, settled_micro_usd=$3, provider_cost_micro_usd=$4, uncertain=$5, settled_at=now() WHERE id=$1`, [row.id, status, userDebit.toString(), providerCostMicroUsd?.toString() ?? null, uncertain]);
+    if (reserved > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key,metadata) VALUES ($1,$2,'release',$3,$4,$5) ON CONFLICT (idempotency_key) DO NOTHING`, [row.account_id, row.id, reserved.toString(), `release:${operationKey}`, JSON.stringify({ channel: row.channel, uncertain })]);
+    if (userDebit > 0n) await db.query(`INSERT INTO compute_ledger_entries (account_id,reservation_id,entry_type,amount_micro_usd,idempotency_key,metadata) VALUES ($1,$2,'user_debit',$3,$4,$5) ON CONFLICT (idempotency_key) DO NOTHING`, [row.account_id, row.id, userDebit.toString(), `debit:${operationKey}`, JSON.stringify({ providerCostMicroUsd: providerCostMicroUsd?.toString() ?? null, uncertain, channel: row.channel })]);
+    await db.query(`INSERT INTO inference_usage_events (account_id,inference_id,reservation_id,api_key_id,operation_key,channel,event_type,input_tokens,output_tokens,provider_cost_micro_usd,user_debit_micro_usd,pricing_markup_micro,usage_status,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (operation_key,event_type) DO NOTHING`, [row.account_id, row.inference_id ?? null, row.id, row.api_key_id ?? row.inference_api_key_id ?? null, operationKey, row.channel, usage.eventType ?? (uncertain ? "uncertain" : "provider_usage"), usage.inputTokens ?? null, usage.outputTokens ?? null, providerCostMicroUsd?.toString() ?? null, userDebit.toString(), usage.markupMicro?.toString() ?? null, uncertain ? "pending_reconciliation" : "known", JSON.stringify({ channel: row.channel })]);
+    return (await db.query(`SELECT * FROM compute_reservations WHERE id=$1`, [row.id])).rows[0];
   });
 }

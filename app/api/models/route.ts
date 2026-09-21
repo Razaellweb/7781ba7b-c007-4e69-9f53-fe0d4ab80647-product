@@ -3,8 +3,8 @@ import { authenticatePrivyRequest, AuthenticationError } from "../../../lib/serv
 import { listActiveModels, syncCuratedModels } from "../../../lib/server/models";
 import { ensureMigrated } from "../../../lib/server/migrate";
 
-// Synchronization and provider access remain server-side. Only approved rows
-// from the curated registry are returned to the authenticated dashboard.
+// Public model identity is always the curated first-party slug. Provider
+// identifiers, pricing, headers, metadata, and synchronization details remain server-side.
 export async function GET(request: Request) {
   try {
     await ensureMigrated();
@@ -17,16 +17,15 @@ export async function GET(request: Request) {
       family: model.family,
       featured: model.featured,
       registryStatus: model.status,
+      provider: "curated",
+      canonicalProviderModelId: null,
+      pricing: {},
+      architecture: null,
+      inputModalities: [],
+      outputModalities: [],
+      supportedParameters: [],
       contextLength: model.provider_metadata?.contextLength ?? model.context_length,
-      provider: model.provider,
-      canonicalProviderModelId: model.provider_metadata?.canonicalId ?? null,
-      pricing: model.provider_metadata?.pricing ?? {},
-      architecture: model.provider_metadata?.architecture ?? null,
-      inputModalities: model.provider_metadata?.inputModalities ?? [],
-      outputModalities: model.provider_metadata?.outputModalities ?? [],
-      supportedParameters: model.provider_metadata?.supportedParameters ?? [],
       availability: model.provider_metadata?.availability ?? "unavailable",
-      metadataSyncedAt: model.provider_metadata?.syncedAt ?? null,
       syncStatus: model.provider_sync_status,
     }));
     return NextResponse.json({ models: data, count: data.length, sync: { unavailable: sync.unavailable, stale: Boolean(sync.error) } });

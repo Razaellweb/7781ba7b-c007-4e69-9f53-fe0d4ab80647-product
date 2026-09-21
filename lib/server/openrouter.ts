@@ -1,75 +1,71 @@
 import { openRouterConfig } from "./config";
-import type { InferenceChunk, InferenceProvider, InferenceRequest } from "./inference";
+import { normalizedProviderError, type InferenceChunk, type InferenceProvider, type InferenceRequest, type ProviderCatalogModel, type InferenceHealth } from "./inference";
 
-export class ProviderUnavailableError extends Error { readonly code = "PROVIDER_UNAVAILABLE"; }
+type CatalogPayload = { data?: unknown };
+type StreamEvent = { choices?: Array<{ delta?: { content?: unknown } }>; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cost?: unknown }; error?: unknown };
+
+function objectValue(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+function safeInteger(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null; }
+function safeStringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 50) : []; }
+function safePricing(value: unknown): Record<string, string> {
+  const raw = objectValue(value); if (!raw) return {};
+  const entries: Array<[string, string]> = [];
+  for (const [key, item] of Object.entries(raw)) if (/^[a-z_]+$/.test(key) && typeof item === "string" && /^-?\d+(\.\d+)?$/.test(item)) entries.push([key, item]);
+  return Object.fromEntries(entries);
+}
+function normalizeCatalogModel(value: unknown): ProviderCatalogModel | null {
+  const raw = objectValue(value); if (!raw || typeof raw.id !== "string" || !raw.id.trim()) return null;
+  const architecture = objectValue(raw.architecture);
+  return { providerModelId: raw.id, contextLength: safeInteger(raw.context_length), pricing: safePricing(raw.pricing), architecture: { inputModalities: safeStringArray(architecture?.input_modalities), outputModalities: safeStringArray(architecture?.output_modalities) }, supportedParameters: safeStringArray(raw.supported_parameters) };
+}
+function errorCode(status: number): ReturnType<typeof normalizedProviderError> {
+  if (status === 401 || status === 403) return normalizedProviderError("authentication");
+  if (status === 404) return normalizedProviderError("unsupported_model");
+  if (status === 408 || status === 504) return normalizedProviderError("timeout");
+  if (status === 429) return normalizedProviderError("rate_limited");
+  if (status >= 500) return normalizedProviderError("upstream");
+  return normalizedProviderError("invalid_request");
+}
 
 export class OpenRouterProvider implements InferenceProvider {
+  private config() { return openRouterConfig(); }
   async *stream(request: InferenceRequest): AsyncIterable<InferenceChunk> {
-    const config = openRouterConfig();
-    if (!config.enabled) {
-      yield { type: "error", error: { code: "unavailable", message: "Inference provider is not enabled", retryable: false } };
-      return;
-    }
-    const response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://openweight.systems", "X-Title": "Openweight" },
-      body: JSON.stringify({ model: request.model, messages: request.messages, stream: true, usage: { include: true } }),
-      signal: request.signal,
-    });
-    if (!response.ok || !response.body) {
-      const detail = await response.text().catch(() => "");
-      console.error(`[openrouter] upstream request failed status=${response.status} model=${request.model} body=${detail.slice(0, 500)}`);
-      yield { type: "error", error: { code: response.status === 429 ? "rate_limited" : "upstream", message: "Inference provider request failed", retryable: response.status >= 500 || response.status === 429 } };
-      return;
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let output = "";
-    let buffer = "";
-    let usage: InferenceChunk = { type: "complete", output: "", usage: { inputTokens: null, outputTokens: null, providerCostMicroUsd: null, uncertain: true } };
+    let config: ReturnType<OpenRouterProvider["config"]>;
+    try { config = this.config(); } catch { yield { type: "error", error: normalizedProviderError("unavailable") }; return; }
+    if (!config.enabled) { yield { type: "error", error: normalizedProviderError("unavailable") }; return; }
+    let response: Response;
+    try {
+      response = await fetch(`${config.baseUrl}/chat/completions`, { method: "POST", headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://openweight.systems", "X-Title": "Openweight" }, body: JSON.stringify({ model: request.model, messages: request.messages, stream: true, usage: { include: true } }), signal: request.signal });
+    } catch { yield { type: "error", error: normalizedProviderError("unavailable") }; return; }
+    if (!response.ok || !response.body) { console.error(`[provider] inference transport failed status=${response.status}`); yield { type: "error", error: errorCode(response.status) }; return; }
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let output = ""; let buffer = "";
+    let finalUsage: InferenceChunk = { type: "complete", output: "", usage: { inputTokens: null, outputTokens: null, providerCostMicroUsd: null, uncertain: true } };
     try {
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        // Buffer across reads: an SSE line may be split across chunk boundaries.
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? ""; // keep the last, possibly-incomplete line for the next read
+        const { done, value } = await reader.read(); if (done) break;
+        buffer += decoder.decode(value, { stream: true }); const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
         for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line.startsWith("data:")) continue;
-          const raw = line.slice(5).trim();
-          if (!raw || raw === "[DONE]") continue;
-          let event: { choices?: Array<{ delta?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number }; error?: { message?: string; code?: number | string } };
-          try {
-            event = JSON.parse(raw);
-          } catch {
-            // A parse failure here means a genuinely malformed event (buffering
-            // already handles split lines), so surface it rather than looping.
-            console.error(`[openrouter] malformed stream event model=${request.model} raw=${raw.slice(0, 300)}`);
-            yield { type: "error", error: { code: "malformed_response", message: "Provider returned an invalid stream event", retryable: true } };
-            return;
-          }
-          if (event.error) {
-            console.error(`[openrouter] in-stream error model=${request.model} error=${JSON.stringify(event.error).slice(0, 500)}`);
-            yield { type: "error", error: { code: "upstream", message: event.error.message || "Inference provider returned an error", retryable: true } };
-            return;
-          }
-          const text = event.choices?.[0]?.delta?.content ?? "";
-          if (text) { output += text; yield { type: "delta", text }; }
-          if (event.usage) { const cost = event.usage.cost; usage = { type: "complete", output, usage: { inputTokens: event.usage.prompt_tokens ?? null, outputTokens: event.usage.completion_tokens ?? null, providerCostMicroUsd: typeof cost === "number" ? BigInt(Math.round(cost * 1_000_000)) : null, uncertain: typeof cost !== "number" } }; }
+          const line = rawLine.trim(); if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim(); if (!raw || raw === "[DONE]") continue;
+          let event: StreamEvent; try { event = JSON.parse(raw) as StreamEvent; } catch { yield { type: "error", error: normalizedProviderError("malformed_response") }; return; }
+          if (event.error !== undefined) { yield { type: "error", error: normalizedProviderError("upstream") }; return; }
+          const text = event.choices?.[0]?.delta?.content;
+          if (typeof text === "string" && text) { output += text; yield { type: "delta", text }; }
+          if (event.usage) { const cost = typeof event.usage.cost === "number" && Number.isFinite(event.usage.cost) ? BigInt(Math.round(event.usage.cost * 1_000_000)) : null; finalUsage = { type: "complete", output, usage: { inputTokens: safeInteger(event.usage.prompt_tokens), outputTokens: safeInteger(event.usage.completion_tokens), providerCostMicroUsd: cost, uncertain: cost === null } }; }
         }
       }
-      yield usage;
-    } finally { reader.releaseLock(); }
+      yield finalUsage;
+    } catch { yield { type: "error", error: normalizedProviderError("upstream") }; } finally { reader.releaseLock(); }
   }
-
-  async health() {
-    const config = openRouterConfig();
-    if (!config.enabled) return { healthy: false, provider: "openrouter", message: "Provider is not enabled" };
-    const response = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` } }).catch(() => null);
-    return { healthy: Boolean(response?.ok), provider: "openrouter", message: response?.ok ? undefined : "Provider health check failed" };
+  async catalog(): Promise<ProviderCatalogModel[]> {
+    const config = this.config(); if (!config.enabled) throw new Error("catalog_unavailable");
+    let response: Response; try { response = await fetch(`${config.baseUrl}/models`, { headers: { Authorization: `Bearer ${config.apiKey}` }, cache: "no-store" }); } catch { throw new Error("catalog_unavailable"); }
+    if (!response.ok) { console.error(`[provider] catalog transport failed status=${response.status}`); throw new Error("catalog_unavailable"); }
+    const payload = await response.json() as CatalogPayload; if (!Array.isArray(payload.data)) throw new Error("catalog_malformed");
+    return payload.data.map(normalizeCatalogModel).filter((model): model is ProviderCatalogModel => model !== null);
   }
-
+  async health(): Promise<InferenceHealth> { try { await this.catalog(); return { healthy: true, message: "available" }; } catch { return { healthy: false, message: "unavailable" }; } }
   async cancel(_operationKey: string) { return; }
 }
+
+export async function getInferenceHealth(): Promise<InferenceHealth> { return new OpenRouterProvider().health(); }
