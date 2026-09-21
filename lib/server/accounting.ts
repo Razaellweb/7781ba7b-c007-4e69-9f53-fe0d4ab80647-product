@@ -51,3 +51,18 @@ export async function settleReservation(operationKey: string, userDebit: MicroUs
     return (await db.query(`SELECT * FROM compute_reservations WHERE id=$1`, [row.id])).rows[0];
   });
 }
+
+export async function reportFinalizationFailure(operationKey: string, correlationId: string, stage: "settlement" | "assistant_persistence" | "inference_update" | "conversation_update", failure: unknown) {
+  const failureCode = failure instanceof AccountingError ? failure.code : failure instanceof Error ? failure.name : "UNKNOWN_ERROR";
+  try {
+    await transaction(async db => {
+      const record = await db.query<{ account_id: string; id: string; channel: AccountingChannel; api_key_id: string | null }>(`SELECT id,account_id,channel,api_key_id FROM inference_records WHERE operation_key=$1 FOR UPDATE`, [operationKey]);
+      if (!record.rowCount) throw new AccountingError("Inference record not found", "INFERENCE_RECORD_MISSING");
+      const row = record.rows[0];
+      await db.query(`UPDATE inference_records SET reconciliation_required=true, status=CASE WHEN status='complete' THEN 'uncertain' ELSE status END, metadata=metadata || $2::jsonb WHERE id=$1`, [row.id, JSON.stringify({ finalizationFailure: { stage, correlationId, code: failureCode } })]);
+      await db.query(`INSERT INTO inference_usage_events (account_id,inference_id,api_key_id,operation_key,channel,event_type,user_debit_micro_usd,usage_status,metadata) VALUES ($1,$2,$3,$4,$5,'uncertain',0,'pending_reconciliation',$6) ON CONFLICT (operation_key,event_type) DO NOTHING`, [row.account_id, row.id, row.api_key_id, operationKey, row.channel, JSON.stringify({ stage, correlationId, code: failureCode })]);
+    });
+  } catch (signalError) {
+    console.error(JSON.stringify({ event: "inference_finalization_reconciliation_signal_failed", reconciliation_signal: "manual_reconciliation_required", operationKey, correlationId, stage, code: failureCode, error: signalError instanceof Error ? signalError.name : "UNKNOWN_ERROR" }));
+  }
+}

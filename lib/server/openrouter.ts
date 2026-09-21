@@ -4,19 +4,18 @@ import { normalizedProviderError, type InferenceChunk, type InferenceProvider, t
 type CatalogPayload = { data?: unknown };
 type StreamEvent = { choices?: Array<{ delta?: { content?: unknown } }>; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cost?: unknown }; error?: unknown };
 
-function objectValue(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+function objectValue(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function safeInteger(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null; }
 function safeStringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 50) : []; }
 function safePricing(value: unknown): Record<string, string> {
-  const raw = objectValue(value); if (!raw) return {};
-  const entries: Array<[string, string]> = [];
+  const raw = objectValue(value); const entries: Array<[string, string]> = [];
   for (const [key, item] of Object.entries(raw)) if (/^[a-z_]+$/.test(key) && typeof item === "string" && /^-?\d+(\.\d+)?$/.test(item)) entries.push([key, item]);
   return Object.fromEntries(entries);
 }
 function normalizeCatalogModel(value: unknown): ProviderCatalogModel | null {
-  const raw = objectValue(value); if (!raw || typeof raw.id !== "string" || !raw.id.trim()) return null;
+  const raw = objectValue(value); if (typeof raw.id !== "string" || !raw.id.trim()) return null;
   const architecture = objectValue(raw.architecture);
-  return { providerModelId: raw.id, contextLength: safeInteger(raw.context_length), pricing: safePricing(raw.pricing), architecture: { inputModalities: safeStringArray(architecture?.input_modalities), outputModalities: safeStringArray(architecture?.output_modalities) }, supportedParameters: safeStringArray(raw.supported_parameters) };
+  return { providerModelId: raw.id, contextLength: safeInteger(raw.context_length), pricing: safePricing(raw.pricing), architecture: { inputModalities: safeStringArray(architecture.input_modalities), outputModalities: safeStringArray(architecture.output_modalities) }, supportedParameters: safeStringArray(raw.supported_parameters) };
 }
 function errorCode(status: number): ReturnType<typeof normalizedProviderError> {
   if (status === 401 || status === 403) return normalizedProviderError("authentication");
@@ -33,16 +32,30 @@ export class OpenRouterProvider implements InferenceProvider {
     let config: ReturnType<OpenRouterProvider["config"]>;
     try { config = this.config(); } catch { yield { type: "error", error: normalizedProviderError("unavailable") }; return; }
     if (!config.enabled) { yield { type: "error", error: normalizedProviderError("unavailable") }; return; }
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(() => timeoutController.abort(), 120_000);
+    const onAbort = () => timeoutController.abort();
+    if (request.signal?.aborted) { clearTimeout(timeout); yield { type: "error", error: normalizedProviderError("cancelled") }; return; }
+    request.signal?.addEventListener("abort", onAbort, { once: true });
     let response: Response;
+    const payload: Record<string, unknown> = { model: request.model, messages: request.messages, stream: true, usage: { include: true } };
+    if (request.parameters?.temperature !== undefined) payload.temperature = request.parameters.temperature;
+    if (request.parameters?.top_p !== undefined) payload.top_p = request.parameters.top_p;
+    if (request.parameters?.max_tokens !== undefined) payload.max_tokens = request.parameters.max_tokens;
+    if (request.parameters?.max_completion_tokens !== undefined) payload.max_completion_tokens = request.parameters.max_completion_tokens;
     try {
-      response = await fetch(`${config.baseUrl}/chat/completions`, { method: "POST", headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://openweight.systems", "X-Title": "Openweight" }, body: JSON.stringify({ model: request.model, messages: request.messages, stream: true, usage: { include: true } }), signal: request.signal });
-    } catch { yield { type: "error", error: normalizedProviderError("unavailable") }; return; }
-    if (!response.ok || !response.body) { console.error(`[provider] inference transport failed status=${response.status}`); yield { type: "error", error: errorCode(response.status) }; return; }
+      response = await fetch(`${config.baseUrl}/chat/completions`, { method: "POST", headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json", "HTTP-Referer": "https://openweight.systems", "X-Title": "Openweight" }, body: JSON.stringify(payload), signal: timeoutController.signal });
+    } catch (caught) {
+      clearTimeout(timeout); request.signal?.removeEventListener("abort", onAbort);
+      yield { type: "error", error: request.signal?.aborted ? normalizedProviderError("cancelled") : normalizedProviderError(timeoutController.signal.aborted ? "timeout" : "unavailable") }; return;
+    }
+    if (!response.ok || !response.body) { clearTimeout(timeout); request.signal?.removeEventListener("abort", onAbort); console.error(`[provider] inference transport failed status=${response.status}`); yield { type: "error", error: errorCode(response.status) }; return; }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let output = ""; let buffer = "";
     let finalUsage: InferenceChunk = { type: "complete", output: "", usage: { inputTokens: null, outputTokens: null, providerCostMicroUsd: null, uncertain: true } };
+    let endedNormally = false;
     try {
       while (true) {
-        const { done, value } = await reader.read(); if (done) break;
+        const { done, value } = await reader.read(); if (done) { endedNormally = true; break; }
         buffer += decoder.decode(value, { stream: true }); const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
         for (const rawLine of lines) {
           const line = rawLine.trim(); if (!line.startsWith("data:")) continue;
@@ -54,8 +67,10 @@ export class OpenRouterProvider implements InferenceProvider {
           if (event.usage) { const cost = typeof event.usage.cost === "number" && Number.isFinite(event.usage.cost) ? BigInt(Math.round(event.usage.cost * 1_000_000)) : null; finalUsage = { type: "complete", output, usage: { inputTokens: safeInteger(event.usage.prompt_tokens), outputTokens: safeInteger(event.usage.completion_tokens), providerCostMicroUsd: cost, uncertain: cost === null } }; }
         }
       }
-      yield finalUsage;
-    } catch { yield { type: "error", error: normalizedProviderError("upstream") }; } finally { reader.releaseLock(); }
+      if (endedNormally) yield finalUsage;
+    } catch {
+      yield { type: "error", error: request.signal?.aborted ? normalizedProviderError("cancelled") : timeoutController.signal.aborted ? normalizedProviderError("timeout") : normalizedProviderError("upstream") };
+    } finally { clearTimeout(timeout); request.signal?.removeEventListener("abort", onAbort); reader.releaseLock(); }
   }
   async catalog(): Promise<ProviderCatalogModel[]> {
     const config = this.config(); if (!config.enabled) throw new Error("catalog_unavailable");
@@ -68,4 +83,4 @@ export class OpenRouterProvider implements InferenceProvider {
   async cancel(_operationKey: string) { return; }
 }
 
-export async function getInferenceHealth(): Promise<InferenceHealth> { return new OpenRouterProvider().health(); }
+export async function getInferenceHealth(): Promise<InferenceHealth> { return new OpenRouterProvider().health(); } 

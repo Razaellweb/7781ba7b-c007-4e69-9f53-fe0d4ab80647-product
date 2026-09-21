@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest, AuthenticationError } from "../../../lib/server/auth";
 import { verifyHolder } from "../../../lib/server/holder";
-import { reserveCompute, settleReservation, AccountingError } from "../../../lib/server/accounting";
+import { reserveCompute, settleReservation, reportFinalizationFailure, AccountingError } from "../../../lib/server/accounting";
 import { query } from "../../../lib/server/db";
 import { rateLimit, cacheGet } from "../../../lib/server/redis";
 import { getInferenceProvider } from "../../../lib/server/provider";
@@ -45,8 +45,9 @@ export async function POST(request: Request) {
     const cfg = pricingConfig();
     const policy = modelPolicy(model);
     const channel = isApiKey ? "api_key" : "app";
-    const claimed = await query<{ id: string; status: string; conversation_id: string }>(`INSERT INTO inference_records (account_id, operation_key, provider, model, provider_model, conversation_id, status, markup_micro, metadata, api_key_id, channel, client_request_id) VALUES ($1,$2,$3,$4,$5,$6,'started',$7,$8,$9,$10,$11) ON CONFLICT (operation_key) DO NOTHING RETURNING id,status,conversation_id`, [account.accountId, operationKey, "internal", model.slug, "internal", conversationId, policy.markupMicro.toString(), JSON.stringify({ requestId, channel, apiKeyId: account.apiKeyId ?? null }), account.apiKeyId ?? null, channel, clientRequestId]);
+    const claimed = await query<{ id: string; status: string; conversation_id: string }>(`INSERT INTO inference_records (account_id, operation_key, provider, model, provider_model, conversation_id, status, markup_micro, metadata, api_key_id, channel, client_request_id) VALUES ($1,$2,$3,$4,$5,$6,'started',$7,$8,$9,$10,$11) ON CONFLICT (operation_key) DO NOTHING RETURNING id,status,conversation_id`, [account.accountId, operationKey, model.provider, model.slug, model.provider_model_slug, conversationId, policy.markupMicro.toString(), JSON.stringify({ requestId, channel, apiKeyId: account.apiKeyId ?? null }), account.apiKeyId ?? null, channel, clientRequestId]);
     if (!claimed[0]) return NextResponse.json({ error: "This inference request has already been accepted", code: "DUPLICATE_REQUEST", requestId, operationKey, conversationId }, { status: 409 });
+    const inferenceId = claimed[0].id;
     const priorRows = await query<{ role: "user" | "assistant"; content: string }>(`SELECT role, content FROM messages WHERE conversation_id=$1 AND partial=false ORDER BY created_at ASC LIMIT $2`, [conversationId, CONTEXT_LIMIT]);
     const systemPrompt: InferenceMessage = { role: "system", content: "You are Openweight, a helpful AI assistant. Always respond in the same language the user writes in. If the user's language is unclear, respond in English. Do not default to Chinese." };
     const contextMessages: InferenceMessage[] = [systemPrompt, ...priorRows.map((r) => ({ role: r.role, content: r.content })), { role: "user", content: text }];
@@ -62,14 +63,24 @@ export async function POST(request: Request) {
         const send = (obj: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
         const finalize = async (status: "complete" | "cancelled" | "failed" | "uncertain", providerCost: bigint | null, usage: { inputTokens: number | null; outputTokens: number | null } | null, uncertain: boolean) => {
           if (settled) return;
-          settled = true;
+          const correlationId = `${requestId}:${inferenceId}`;
           const userDebit = providerCost != null && !uncertain ? computeUserDebit(providerCost, policy) : 0n;
           const cappedDebit = userDebit > cfg.reservationCapMicroUsd ? cfg.reservationCapMicroUsd : userDebit;
           const isUncertain = uncertain || (status !== "complete" && providerCost == null && output.length > 0);
-          await settleReservation(operationKey, cappedDebit, providerCost, isUncertain, { inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens, eventType: status === "complete" ? "provider_usage" : status === "cancelled" ? "cancelled" : status === "failed" ? "provider_failure" : "uncertain", markupMicro: policy.markupMicro }).catch(() => undefined);
-          if (output) await query(`INSERT INTO messages (conversation_id,account_id,role,content,partial,model_slug,provider_model,input_tokens,output_tokens,provider_cost_micro_usd,user_debit_micro_usd) VALUES ($1,$2,'assistant',$3,$4,$5,$6,$7,$8,$9,$10)`, [conversationId, account.accountId, output, status !== "complete", model.slug, "internal", usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString()]).catch(() => undefined);
-          await query(`UPDATE inference_records SET status=$2, input_tokens=$3, output_tokens=$4, provider_cost_micro_usd=$5, user_debit_micro_usd=$6, reconciliation_required=$7, completed_at=now() WHERE operation_key=$1`, [operationKey, status, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString(), isUncertain]).catch(() => undefined);
-          await query(`UPDATE conversations SET updated_at=now() WHERE id=$1`, [conversationId]).catch(() => undefined);
+          try {
+            await settleReservation(operationKey, cappedDebit, providerCost, isUncertain, { inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens, eventType: status === "complete" ? "provider_usage" : status === "cancelled" ? "cancelled" : status === "failed" ? "provider_failure" : "uncertain", markupMicro: policy.markupMicro });
+          } catch (error) {
+            await reportFinalizationFailure(operationKey, correlationId, "settlement", error);
+            throw error;
+          }
+          try {
+            if (output) await query(`INSERT INTO messages (inference_id,conversation_id,account_id,role,content,partial,model_slug,provider_model,input_tokens,output_tokens,provider_cost_micro_usd,user_debit_micro_usd) VALUES ($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (inference_id) WHERE role='assistant' DO NOTHING`, [inferenceId, conversationId, account.accountId, output, status !== "complete", model.slug, model.provider_model_slug, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString()]);
+          } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "assistant_persistence", error); throw error; }
+          try {
+            await query(`UPDATE inference_records SET status=$2, input_tokens=$3, output_tokens=$4, provider_cost_micro_usd=$5, user_debit_micro_usd=$6, reconciliation_required=$7, completed_at=now() WHERE operation_key=$1`, [operationKey, status, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString(), isUncertain]);
+            await query(`UPDATE conversations SET updated_at=now() WHERE id=$1`, [conversationId]);
+          } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "inference_update", error); throw error; }
+          settled = true;
         };
         try {
           for await (const chunk of provider.stream({ operationKey, model: model.provider_model_slug, messages: contextMessages })) {
@@ -78,8 +89,8 @@ export async function POST(request: Request) {
             else if (chunk.type === "error") { await finalize("failed", null, null, false); send({ type: "error", code: `INFERENCE_${chunk.error.code.toUpperCase()}`, error: chunk.error.message, retryable: chunk.error.retryable, requestId }); }
           }
           if (stopRequested) { await finalize("cancelled", null, null, true); send({ type: "cancelled", conversationId, requestId }); }
-        } catch { await finalize("uncertain", null, null, true); send({ type: "error", code: "INFERENCE_UNAVAILABLE", error: "Inference could not be completed.", retryable: true, requestId }); }
-        finally { await finalize("failed", null, null, false).catch(() => undefined); controller.close(); }
+        } catch (error) { console.error(JSON.stringify({ event: "inference_stream_finalization_failed", operationKey, inferenceId, requestId, error: error instanceof Error ? error.name : "UNKNOWN_ERROR" })); send({ type: "error", code: "INFERENCE_UNAVAILABLE", error: "Inference could not be completed.", retryable: true, requestId }); }
+        finally { if (!settled) { try { await finalize("failed", null, null, false); } catch (error) { console.error(JSON.stringify({ event: "inference_finalization_failed", operationKey, inferenceId, requestId, error: error instanceof Error ? error.name : "UNKNOWN_ERROR" })); } } controller.close(); }
       },
     });
     return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Request-ID": requestId } });

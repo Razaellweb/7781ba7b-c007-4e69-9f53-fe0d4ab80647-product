@@ -1,9 +1,17 @@
 export type InferenceMessage = { role: "system" | "user" | "assistant"; content: string };
 
+export type CompletionParameters = {
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+};
+
 export type InferenceRequest = {
   operationKey: string;
   model: string;
   messages: InferenceMessage[];
+  parameters?: CompletionParameters;
   signal?: AbortSignal;
   metadata?: Record<string, string>;
 };
@@ -21,7 +29,7 @@ export type InferenceChunk =
   | { type: "error"; error: NormalizedProviderError };
 
 export type NormalizedProviderError = {
-  code: "unsupported_model" | "invalid_request" | "authentication" | "rate_limited" | "timeout" | "upstream" | "malformed_response" | "unavailable";
+  code: "cancelled" | "unsupported_model" | "invalid_request" | "authentication" | "rate_limited" | "timeout" | "upstream" | "malformed_response" | "unavailable";
   message: string;
   retryable: boolean;
 };
@@ -44,6 +52,7 @@ export interface InferenceProvider {
 }
 
 export const PROVIDER_ERRORS: Record<NormalizedProviderError["code"], Omit<NormalizedProviderError, "code">> = {
+  cancelled: { message: "Inference was cancelled.", retryable: false },
   unsupported_model: { message: "The selected model is not available.", retryable: false },
   invalid_request: { message: "The inference request could not be accepted.", retryable: false },
   authentication: { message: "Inference is temporarily unavailable.", retryable: false },
@@ -56,4 +65,4 @@ export const PROVIDER_ERRORS: Record<NormalizedProviderError["code"], Omit<Norma
 
 export function normalizedProviderError(code: NormalizedProviderError["code"]): NormalizedProviderError {
   return { code, ...PROVIDER_ERRORS[code] };
-}
+} 
