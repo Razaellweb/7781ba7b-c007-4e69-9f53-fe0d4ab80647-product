@@ -30,7 +30,10 @@ export async function POST(request: Request) {
   try {
     await ensureMigrated();
     const account = await authenticatePrivyRequest(request.headers.get("authorization"));
-    const body = await request.json().catch(() => ({})) as { name?: unknown; scopes?: unknown; rateLimitPerMinute?: unknown };
+    const parsedBody: unknown = await request.json().catch(() => ({}));
+    const body = parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)
+      ? parsedBody as { name?: unknown; scopes?: unknown; rateLimitPerMinute?: unknown }
+      : {};
     const created = await createApiKey(account.accountId, body);
     return NextResponse.json(created, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) {

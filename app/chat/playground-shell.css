@@ -1,23 +1,152 @@
 .playground-dashboard {
+  display: flex;
   width: 100%;
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.playground-dashboard .compute-sidebar {
+  min-height: 0;
+  height: 100dvh;
 }
 .playground-dashboard .compute-main.playground-dashboard-main {
   flex: 1 1 0;
   width: auto;
   max-width: none;
   min-width: 0;
+  height: 100dvh;
+  min-height: 0;
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 .playground-dashboard .playground-shell {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
-.playground-dashboard .playground-layout {
-  width: min(100%, 1450px);
+.playground-dashboard .playground-layout,
+.playground-dashboard .playground-layout.with-parameters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  width: min(100%, 1600px);
+  height: auto;
+  min-height: 0;
+  flex: 1 1 0;
+  padding: 18px clamp(18px, 3vw, 48px) 16px;
+  overflow: hidden;
 }
 .playground-dashboard .playground-layout.with-parameters {
-  width: min(100%, 1600px);
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 310px);
+  gap: 22px;
+}
+.playground-dashboard .playground-main {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.playground-dashboard .playground-heading {
+  flex: 0 0 auto;
+  align-items: center;
+  padding-bottom: 13px;
+  gap: 16px;
+}
+.playground-dashboard .playground-heading h1 {
+  font-size: clamp(34px, 4vw, 52px);
+  line-height: 1;
+  margin: 7px 0 0;
+  letter-spacing: -.07em;
+}
+.playground-dashboard .playground-heading p {
+  display: none;
+}
+.playground-dashboard .playground-kicker {
+  font-size: 9px;
+}
+.playground-dashboard .parameter-toggle {
+  padding: 9px 12px;
+}
+.playground-dashboard .playground-controls,
+.playground-dashboard .conversation-toolbar,
+.playground-dashboard .playground-state,
+.playground-dashboard .playground-composer,
+.playground-dashboard .playground-footnote {
+  flex: 0 0 auto;
+}
+.playground-dashboard .playground-model-row {
+  grid-template-columns: minmax(180px, 360px) auto minmax(0, 1fr);
+  gap: 13px;
+  padding: 10px 0 12px;
+}
+.playground-dashboard .playground-model-row select {
+  padding-block: 9px;
+}
+.playground-dashboard .model-status,
+.playground-dashboard .selected-model-name {
+  padding-bottom: 10px;
+}
+.playground-dashboard .access-context {
+  padding: 9px 0;
+}
+.playground-dashboard .conversation-toolbar {
+  padding-top: 11px;
+}
+.playground-dashboard .playground-messages {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 13px 8px 10px;
+}
+.playground-dashboard .playground-empty {
+  margin: auto;
+  padding: 15px;
+}
+.playground-dashboard .playground-empty h2 {
+  font-size: clamp(20px, 2.4vw, 25px);
+  margin: 9px 0 6px;
+}
+.playground-dashboard .playground-empty p {
+  font-size: 12px;
+}
+.playground-dashboard .empty-mark {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 12px;
+}
+.playground-dashboard .playground-message {
+  margin-bottom: 10px;
+  padding: 13px 15px;
+}
+.playground-dashboard .playground-message p {
+  margin-top: 7px;
+  font-size: 13px;
+}
+.playground-dashboard .playground-state {
+  margin-bottom: 8px;
+}
+.playground-dashboard .playground-composer textarea {
+  min-height: 72px;
+  max-height: 24dvh;
+}
+.playground-dashboard .composer-footer {
+  min-height: 42px;
+  padding-block: 6px;
+}
+.playground-dashboard .playground-footnote {
+  margin-top: 6px;
+  font-size: 8px;
+}
+.playground-dashboard .playground-parameters {
+  top: 12px;
+  max-height: 100%;
+  overflow-y: auto;
 }
 .playground-dashboard .playground-signout-link {
   display: inline-block;
@@ -28,17 +157,243 @@
 .playground-dashboard .playground-signout-link:hover {
   color: #f0f6fc;
 }
-@media (max-width: 620px) {
+@media (max-width: 900px) {
+  .playground-dashboard .playground-layout.with-parameters {
+    grid-template-columns: minmax(0, 1fr) minmax(230px, 265px);
+    gap: 14px;
+    padding-inline: 20px;
+  }
+  .playground-dashboard .playground-model-row {
+    grid-template-columns: minmax(170px, 1fr) auto;
+  }
+  .playground-dashboard .selected-model-name {
+    grid-column: 1 / -1;
+    justify-self: start;
+    padding: 0;
+  }
+}
+@media (max-width: 700px) {
   .playground-dashboard {
-    display: block;
+    flex-direction: column;
   }
   .playground-dashboard .compute-sidebar {
     width: 100%;
+    flex: 0 0 auto;
+    height: auto;
+    padding: 12px 16px 9px;
+  }
+  .playground-dashboard .compute-sidebar > .compute-eyebrow,
+  .playground-dashboard .compute-sidebar-foot {
+    display: none;
+  }
+  .playground-dashboard .compute-sidebar nav {
+    display: flex;
+    flex-direction: row;
+    gap: 5px;
+    margin-top: 9px;
+  }
+  .playground-dashboard .compute-sidebar nav a {
+    flex: 1 1 0;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 5px;
+    font-size: 10px;
   }
   .playground-dashboard .compute-main.playground-dashboard-main {
     width: 100%;
+    height: 0;
+    min-height: 0;
+    flex: 1 1 0;
   }
-  .playground-dashboard .playground-shell {
-    min-height: auto;
+  .playground-dashboard .playground-layout,
+  .playground-dashboard .playground-layout.with-parameters {
+    width: 100%;
+    padding: 12px 14px max(9px, env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
+  .playground-dashboard .playground-heading {
+    padding-bottom: 8px;
+  }
+  .playground-dashboard .playground-heading h1 {
+    font-size: clamp(29px, 8vw, 40px);
+    margin-top: 5px;
+  }
+  .playground-dashboard .playground-heading .playground-kicker {
+    font-size: 8px;
+  }
+  .playground-dashboard .parameter-toggle {
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 10px;
+  }
+  .playground-dashboard .playground-controls {
+    flex: 0 0 auto;
+  }
+  .playground-dashboard .playground-model-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 11px;
+    padding: 8px 0;
+  }
+  .playground-dashboard .playground-model-row label {
+    gap: 5px;
+  }
+  .playground-dashboard .playground-model-row select {
+    padding: 8px 34px 8px 10px;
+    font-size: 12px;
+    background-position: calc(100% - 15px) 14px, calc(100% - 10px) 14px;
+  }
+  .playground-dashboard .model-status {
+    align-self: end;
+    padding: 0 0 9px;
+    font-size: 9px;
+  }
+  .playground-dashboard .selected-model-name {
+    grid-column: 1 / -1;
+    padding: 0;
+    font-size: 8px;
+  }
+  .playground-dashboard .access-context {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 0;
+  }
+  .playground-dashboard .access-summary {
+    align-items: center;
+    gap: 7px;
+  }
+  .playground-dashboard .access-indicator {
+    margin-top: 0;
+  }
+  .playground-dashboard .access-summary b {
+    font-size: 10px;
+  }
+  .playground-dashboard .access-summary small,
+  .playground-dashboard .access-verified-note {
+    display: none;
+  }
+  .playground-dashboard .verify-button {
+    padding: 7px 9px;
+    min-height: 32px;
+    font-size: 9px;
+  }
+  .playground-dashboard .conversation-toolbar {
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    padding-top: 7px;
+  }
+  .playground-dashboard .conversation-toolbar > div:first-child {
+    gap: 4px;
+  }
+  .playground-dashboard .conversation-toolbar .playground-kicker {
+    font-size: 8px;
+  }
+  .playground-dashboard .conversation-model {
+    font-size: 11px;
+  }
+  .playground-dashboard .conversation-actions {
+    width: auto;
+    gap: 5px;
+  }
+  .playground-dashboard .history-toggle,
+  .playground-dashboard .new-conversation {
+    padding: 7px 9px;
+    font-size: 9px;
+  }
+  .playground-dashboard .playground-messages {
+    flex: 1 1 0;
+    min-height: 34px;
+    padding: 8px 3px;
+  }
+  .playground-dashboard .playground-empty {
+    margin: auto;
+    padding: 7px 4px;
+  }
+  .playground-dashboard .empty-mark {
+    width: 34px;
+    height: 34px;
+    margin-bottom: 7px;
+    font-size: 16px;
+  }
+  .playground-dashboard .empty-overline {
+    font-size: 7px;
+  }
+  .playground-dashboard .playground-empty h2 {
+    font-size: 17px;
+    margin: 6px 0 4px;
+  }
+  .playground-dashboard .playground-empty p {
+    font-size: 10px;
+    line-height: 1.45;
+  }
+  .playground-dashboard .playground-message {
+    padding: 10px 11px;
+  }
+  .playground-dashboard .playground-message p {
+    font-size: 12px;
+  }
+  .playground-dashboard .playground-state {
+    max-height: 58px;
+    overflow-y: auto;
+    font-size: 9px;
+    margin: 0;
+  }
+  .playground-dashboard .playground-composer textarea {
+    min-height: 58px;
+    max-height: 18dvh;
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  .playground-dashboard .composer-footer {
+    min-height: 38px;
+    gap: 5px;
+    padding: 5px 7px 5px 10px;
+  }
+  .playground-dashboard .composer-footer > span {
+    max-width: 65%;
+    font-size: 7px;
+  }
+  .playground-dashboard .composer-footer button {
+    padding: 7px 9px;
+    font-size: 9px;
+  }
+  .playground-dashboard .playground-footnote {
+    display: none;
+  }
+  .playground-dashboard .playground-parameters {
+    position: fixed;
+    z-index: 8;
+    inset: 12px 12px max(12px, env(safe-area-inset-bottom));
+    width: auto;
+    max-height: none;
+    overflow-y: auto;
+    box-shadow: 0 18px 60px #0008;
+  }
+}
+@media (max-width: 390px) {
+  .playground-dashboard .compute-sidebar { padding-inline: 11px; }
+  .playground-dashboard .playground-layout,
+  .playground-dashboard .playground-layout.with-parameters { padding-inline: 10px; }
+  .playground-dashboard .access-context { gap: 4px; }
+  .playground-dashboard .verify-button { font-size: 8px; }
+  .playground-dashboard .composer-footer > span { max-width: 56%; }
+}
+@media (max-height: 620px) and (min-width: 701px) {
+  .playground-dashboard .playground-layout,
+  .playground-dashboard .playground-layout.with-parameters {
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+  .playground-dashboard .playground-heading { padding-bottom: 7px; }
+  .playground-dashboard .playground-heading h1 { font-size: 34px; margin-top: 4px; }
+  .playground-dashboard .playground-model-row { padding-block: 6px; }
+  .playground-dashboard .access-context { padding-block: 5px; }
+  .playground-dashboard .playground-composer textarea { min-height: 52px; }
+  .playground-dashboard .playground-footnote { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .playground-dashboard .playground-shell * { scroll-behavior: auto; }
 }

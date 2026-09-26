@@ -345,3 +345,179 @@
   .compute-dashboard .compute-header-actions button,
   .compute-dashboard .compute-section-head > a { transition: none !important; }
 }
+
+/* Coordinated surfaces, intentionally distinct across Overview, chat, and API access. */
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) {
+  --dash-paper: #0c1117;
+  --dash-card: #141a20;
+  --dash-line: #303840;
+  background: #0c1117 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard):before {
+  background: linear-gradient(100deg, transparent, #344d5b28 22%, #6c817e1a 46%, #725c4d20 68%, transparent) !important;
+  opacity: .3 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-sidebar {
+  background: #10161df5 !important;
+  border-color: #303840 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-sidebar nav a.active,
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-sidebar nav a:hover {
+  background: #1b242d !important;
+  box-shadow: inset 0 0 0 1px #34414c !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card,
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-note-card {
+  background: #141a20 !important;
+  border-color: #303840 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .model-glyph {
+  background: #202a32 !important;
+  color: #a9c4c3 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card .model-card-action {
+  color: #a4c2c4 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-balance-card {
+  background: #060809 !important;
+  border-color: #34383a !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-balance-card:after {
+  background: linear-gradient(90deg, transparent, #526b6b35 28%, #ba8c6933 58%, transparent) !important;
+  opacity: .3 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-header-actions button,
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-section-head > a {
+  background: #151b21 !important;
+  border-color: #444a4e !important;
+  color: #dce2e5 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card:hover,
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card:focus-visible {
+  border-color: #83a7a3 !important;
+  outline-color: #83a7a3 !important;
+}
+.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-dashboard :is(a, button):focus-visible {
+  outline-color: #b8c5bd !important;
+}
+
+/* Near-black chat with muted mineral-blue controls and a restrained clay send action. */
+.playground-dashboard {
+  background: #080909 !important;
+}
+.playground-dashboard .compute-sidebar {
+  background: #0c0e10 !important;
+  border-color: #282b2d !important;
+}
+.playground-dashboard .compute-sidebar nav a.active,
+.playground-dashboard .compute-sidebar nav a:hover {
+  background: #1a1c1d !important;
+  box-shadow: inset 0 0 0 1px #373b3c !important;
+}
+.playground-dashboard .playground-shell {
+  --bg: #090a0a !important;
+  --surface: #141515 !important;
+  --surface-raised: #1c1d1d !important;
+  --line: #303232 !important;
+  --line-strong: #4b4e4d !important;
+  background: #090a0a !important;
+}
+.playground-dashboard .playground-topbar {
+  background: #0b0c0c !important;
+  border-color: #292c2b !important;
+}
+.playground-dashboard .playground-heading h1 span { color: #c58a70 !important; }
+.playground-dashboard .playground-model-row select,
+.playground-dashboard .playground-composer,
+.playground-dashboard .playground-parameters,
+.playground-dashboard .history-panel,
+.playground-dashboard .playground-message {
+  background-color: #141515 !important;
+}
+.playground-dashboard .playground-message.user {
+  background: #1a1715 !important;
+  border-color: #41352f !important;
+}
+.playground-dashboard .playground-message > span:first-child { color: #c59b83 !important; }
+.playground-dashboard .empty-mark {
+  background: #211915 !important;
+  color: #e39a7a !important;
+}
+.playground-dashboard .new-conversation,
+.playground-dashboard .composer-footer button:not(.stop-button) {
+  background: #ad7057 !important;
+  border-color: #bd8165 !important;
+  color: #fff7f2 !important;
+}
+.playground-dashboard .new-conversation:hover,
+.playground-dashboard .composer-footer button:hover:not(:disabled) {
+  background: #bf8062 !important;
+}
+.playground-dashboard .composer-footer button.stop-button {
+  background: #29221e !important;
+  border-color: #625043 !important;
+  color: #ead4c5 !important;
+}
+.playground-dashboard .playground-composer:focus-within { border-color: #9a785f !important; }
+.playground-dashboard :is(a, button, input, select, textarea):focus-visible {
+  outline-color: #d3a27f !important;
+  box-shadow: 0 0 0 3px #805d4c55 !important;
+}
+
+/* API credentials retain a deeper blue-slate panel treatment, not the chat palette. */
+.api-keys-dashboard {
+  background: #0a1018 !important;
+}
+.api-keys-dashboard .compute-sidebar {
+  background: #0d1520 !important;
+  border-color: #2b3a49 !important;
+}
+.api-keys-dashboard .compute-sidebar nav a.active,
+.api-keys-dashboard .compute-sidebar nav a:hover {
+  background: #172431 !important;
+}
+.api-keys-dashboard .key-panel {
+  background: #121c27 !important;
+  border-color: #334455 !important;
+}
+.api-keys-dashboard .create-key-panel input {
+  background: #0b121a !important;
+  border-color: #405365 !important;
+}
+.api-keys-dashboard .key-primary-button {
+  background: #31566f !important;
+  border-color: #557d96 !important;
+  color: #f2f6f8 !important;
+}
+.api-keys-dashboard .key-primary-button:hover {
+  background: #3b6782 !important;
+}
+.api-keys-dashboard .key-quiet-button {
+  background: #192735 !important;
+  border-color: #455969 !important;
+  color: #d6e0e8 !important;
+}
+.api-keys-dashboard .one-time-secret {
+  background: #182a36 !important;
+  border-color: #496678 !important;
+}
+.api-keys-dashboard .one-time-label,
+.api-keys-dashboard .key-empty-mark { color: #a4c5d2 !important; }
+.api-keys-dashboard .key-state,
+.api-keys-dashboard .key-row { border-color: #334455 !important; }
+.api-keys-dashboard .key-count,
+.api-keys-dashboard .key-status.active { color: #9ac9ad !important; }
+.api-keys-dashboard .key-feedback.success {
+  border-color: #3d6550 !important;
+  background: #14251f !important;
+}
+.api-keys-dashboard :is(a, button, input, select, textarea):focus-visible {
+  outline-color: #9dc6dc !important;
+  box-shadow: 0 0 0 4px #31566f66 !important;
+}
+@media (max-width: 700px) {
+  .playground-dashboard {
+    height: 100dvh !important;
+    min-height: 0 !important;
+  }
+}

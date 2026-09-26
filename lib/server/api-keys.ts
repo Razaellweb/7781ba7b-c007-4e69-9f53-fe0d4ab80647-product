@@ -98,10 +98,10 @@ async function insertKey(
 ) {
   const generated = generation(input);
   const result = await db.query<KeyRow>(
-    `INSERT INTO api_keys (account_id,name,secret_hash,scopes,rate_limit_per_minute)
-     VALUES ($1,$2,$3,$4,$5)
+    `INSERT INTO api_keys (account_id,name,key_prefix,secret_hash,scopes,rate_limit_per_minute)
+     VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING id,account_id,name,secret_hash,scopes,rate_limit_per_minute,created_at,last_used_at,revoked_at`,
-    [accountId, generated.name, generated.hash, generated.scopes, generated.rate],
+    [accountId, generated.name, "ow_live", generated.hash, generated.scopes, generated.rate],
   );
   return { secret: generated.secret, key: publicMetadata(result.rows[0]) };
 }

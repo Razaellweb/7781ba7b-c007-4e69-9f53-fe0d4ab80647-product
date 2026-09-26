@@ -65,6 +65,12 @@ export default function SettingsPage() {
   const create = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy || actionInProgress.current) return;
+    const normalizedName = name.trim();
+    if (!normalizedName || normalizedName.length > 80) {
+      setSecret("");
+      setMessage({ tone: "error", text: "Enter a key name between 1 and 80 characters." });
+      return;
+    }
     actionInProgress.current = true;
     setBusy(true);
     setMessage(null);
@@ -73,16 +79,25 @@ export default function SettingsPage() {
       const response = await fetch("/api/api-keys", {
         method: "POST",
         headers: { ...(await headers()), "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name: normalizedName }),
       });
       const data = await response.json() as ApiKeyResult & ApiError;
-      if (!response.ok) throw new Error(data.error ?? "Unable to create API key.");
+      if (!response.ok) throw new Error(data.error ?? "Unable to create API key. Please try again.");
+      if (!data.key?.id || data.key.name !== normalizedName || data.key.revoked_at || !/^ow_live_[A-Za-z0-9_-]{43}$/.test(data.secret)) {
+        throw new Error("The API key could not be confirmed. Refresh the key list before retrying.");
+      }
+      setKeys((current) => [data.key, ...current.filter((key) => key.id !== data.key.id)]);
       setSecret(data.secret);
       setMessage({ tone: "success", text: "API key created. Copy the secret now; it will only be shown once." });
       setName("");
       await load();
     } catch (error) {
-      setMessage({ tone: "error", text: error instanceof Error ? error.message : "Unable to create API key." });
+      const retryableMessage = error instanceof TypeError || error instanceof SyntaxError
+        ? "The API key service could not be reached. Please refresh your keys and try again."
+        : error instanceof Error
+          ? error.message
+          : "Unable to create API key. Please try again.";
+      setMessage({ tone: "error", text: retryableMessage });
     } finally {
       actionInProgress.current = false;
       setBusy(false);
@@ -183,7 +198,7 @@ export default function SettingsPage() {
           </section>
           <section className="key-panel key-list-panel">
             <div className="key-list-heading"><div><div className="compute-card-label">YOUR API KEYS</div><h2>Active and past credentials</h2></div><span className="key-count">{keys.filter((key) => !key.revoked_at).length} active</span></div>
-            {loading ? <div className="key-state" role="status"><span className="key-state-indicator" />Loading your keys...</div> : loadError ? <div className="key-state key-state-error" role="alert"><strong>Keys could not be loaded</strong><p>{loadError}</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div> : keys.length === 0 ? <div className="key-state key-empty"><span className="key-empty-mark">*</span><strong>No API keys yet.</strong><p>Create a key when you are ready to connect your own integration. Your secret will be displayed only once.</p></div> : <div className="key-list">{keys.map((key) => <article className={`key-row ${key.revoked_at ? "is-revoked" : ""}`} key={key.id}><div className="key-row-main"><div className="key-row-title"><h3>{key.name}</h3><span className={`key-status ${key.revoked_at ? "revoked" : "active"}`}><i />{key.revoked_at ? "Revoked" : "Active"}</span></div><code className="key-prefix">{key.key_prefix}_.............</code><p>{key.scopes.join(" / ")} / {key.rate_limit_per_minute} requests per minute</p><small>Created {dateLabel(key.created_at)} / Last used {dateLabel(key.last_used_at)}</small></div>{!key.revoked_at && <div className="key-row-actions"><button className="key-quiet-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "rotate", key }); }}>Rotate</button><button className="key-danger-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "revoke", key }); }}>Revoke</button></div>}</article>)}</div>}
+            {loading ? <div className="key-state" role="status"><span className="key-state-indicator" />Loading your keys...</div> : loadError && keys.length === 0 ? <div className="key-state key-state-error" role="alert"><strong>Keys could not be loaded</strong><p>{loadError}</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div> : keys.length === 0 ? <div className="key-state key-empty"><span className="key-empty-mark">*</span><strong>No API keys yet.</strong><p>Create a key when you are ready to connect your own integration. Your secret will be displayed only once.</p></div> : <div className="key-list">{loadError && <div className="key-state key-state-error" role="status"><strong>Could not refresh the key list</strong><p>{loadError} Your latest confirmed keys are still shown.</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div>}{keys.map((key) => <article className={`key-row ${key.revoked_at ? "is-revoked" : ""}`} key={key.id}><div className="key-row-main"><div className="key-row-title"><h3>{key.name}</h3><span className={`key-status ${key.revoked_at ? "revoked" : "active"}`}><i />{key.revoked_at ? "Revoked" : "Active"}</span></div><code className="key-prefix">{key.key_prefix}_.............</code><p>{key.scopes.join(" / ")} / {key.rate_limit_per_minute} requests per minute</p><small>Created {dateLabel(key.created_at)} / Last used {dateLabel(key.last_used_at)}</small></div>{!key.revoked_at && <div className="key-row-actions"><button className="key-quiet-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "rotate", key }); }}>Rotate</button><button className="key-danger-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "revoke", key }); }}>Revoke</button></div>}</article>)}</div>}
           </section>
         </div>
         {message && <div className={`key-feedback ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div>}
