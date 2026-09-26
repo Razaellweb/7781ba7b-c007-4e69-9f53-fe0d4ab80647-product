@@ -99,6 +99,10 @@ export async function listActiveModels(): Promise<ModelRow[]> {
   return selectModels("status = 'active' AND visibility = 'public'");
 }
 
+export async function listDiscoverableModels(): Promise<ModelRow[]> {
+  return selectModels("status IN ('active','paused') AND visibility = 'public'");
+}
+
 export async function getActiveModel(slug: string): Promise<ModelRow | null> {
   return (await selectModels("slug = $1 AND status = 'active' AND visibility = 'public' AND provider_sync_status = 'current'", [slug], "sort_order ASC, display_name ASC", 1))[0] ?? null;
 }

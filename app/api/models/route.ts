@@ -1,16 +1,15 @@
 import { NextResponse } from "next/server";
-import { listActiveModels, syncCuratedModels } from "../../../lib/server/models";
+import { listDiscoverableModels, syncCuratedModels } from "../../../lib/server/models";
 import { ensureMigrated } from "../../../lib/server/migrate";
 
-// The curated public catalog is safe for the landing Playground and workspace.
-// Provider identifiers are registry metadata; inference still routes only from
-// the server-side ModelRow returned by lifecycle-checked selectors.
+// Include paused curated entries so the UI can distinguish their registry state
+// from provider availability. Hidden/draft/deprecated entries remain private.
 export async function GET() {
   try {
     await ensureMigrated();
     const sync = await syncCuratedModels();
     if (sync.error) return NextResponse.json({ error: "Unable to verify curated model metadata", code: "MODELS_METADATA_UNAVAILABLE" }, { status: 503 });
-    const models = await listActiveModels();
+    const models = await listDiscoverableModels();
     const data = models.map((model) => {
       const metadata = model.provider_metadata;
       return {

@@ -46,3 +46,57 @@
   .api-playground-layout { display: block; }
   .api-models { border-right: 0; }
 }
+
+/* The authenticated Playground shares the paper, graphite, and restrained ember language. */
+.playground-shell{--bg:#f2f1ed!important;--surface:#faf9f6!important;--surface-raised:#eeede8!important;--line:#dedbd5!important;--line-strong:#cbc6bd!important;--ink:#20201f!important;--muted:#716e69!important;--subtle:#89847d!important;--accent:#5b816b!important;--warm:#a86a50!important;background:var(--bg)!important;color:var(--ink)!important;font-family:var(--font-geist-sans),Arial,Helvetica,sans-serif!important}
+.playground-shell .playground-topbar{border-color:var(--line)!important;color:var(--muted)!important;background:#eeede8!important}
+.playground-shell .playground-topbar>span.topbar-current,.playground-shell .playground-back{color:#57544f!important}
+.playground-shell .playground-back:hover{color:#20201f!important}
+.playground-shell .playground-balance{color:#52795f!important}
+.playground-shell .playground-balance small{color:#77736e!important}
+.playground-shell .playground-heading h1{color:#20201f!important}
+.playground-shell .playground-kicker{color:#77736e!important}
+.playground-shell .playground-heading p{color:#716e69!important}
+.playground-shell .parameter-toggle{border-color:var(--line-strong)!important;background:#faf9f6!important;color:#34322f!important}
+.playground-shell .parameter-toggle:hover{background:#fff!important;border-color:#a69f95!important}
+.playground-shell .parameter-toggle span{color:#77736e!important}
+.playground-shell .playground-model-row{border-color:var(--line)!important}
+.playground-shell .playground-model-row label{color:#6d6963!important}
+.playground-shell .playground-model-row select{border-color:var(--line-strong)!important;background-color:#faf9f6!important;color:#20201f!important}
+.playground-shell .model-status.operational{color:#52795f!important}
+.playground-shell .model-status.unavailable{color:#9b5f47!important}
+.playground-shell .selected-model-name{color:#77736e!important}
+.playground-shell .empty-mark{background:#ece5dc!important;color:#9b654e!important}
+.playground-shell .empty-overline{color:#77736e!important}
+.playground-shell .playground-empty h2{color:#292724!important}
+.playground-shell .playground-empty p{color:#716e69!important}
+.playground-shell .playground-message{border-color:var(--line)!important;background:#faf9f6!important}
+.playground-shell .playground-message.user{background:#f4eee8!important;border-color:#e1d2c5!important}
+.playground-shell .playground-message>span:first-child{color:#8d5e49!important}
+.playground-shell .playground-message p{color:#282724!important}
+.playground-shell .playground-state{color:#716e69!important}
+.playground-shell .playground-state.streaming{color:#52795f!important}
+.playground-shell .playground-state.stopped{color:#956344!important}
+.playground-shell .playground-state.error{color:#9b5f47!important}
+.playground-shell .playground-state.error .state-indicator{color:#9b5f47!important}
+.playground-shell .playground-composer{border-color:#d7d2ca!important;background:#faf9f6!important}
+.playground-shell .playground-composer:focus-within{border-color:#a69f95!important}
+.playground-shell .playground-composer textarea{color:#20201f!important}
+.playground-shell .playground-composer textarea::placeholder{color:#89847d!important}
+.playground-shell .composer-footer{border-color:var(--line)!important;color:#77736e!important}
+.playground-shell .composer-footer button{border-color:#a96b51!important;background:#a96b51!important;color:#fffaf5!important}
+.playground-shell .composer-footer button:hover:not(:disabled){background:#935a43!important}
+.playground-shell .composer-footer button.stop-button{border-color:#c9b5a6!important;background:#eee7df!important;color:#6e4d3e!important}
+.playground-shell .playground-footnote{color:#77736e!important}
+.playground-shell .playground-parameters{border-color:var(--line)!important;background:#faf9f6!important}
+.playground-shell .parameters-heading{border-color:var(--line)!important}
+.playground-shell .parameters-heading h2,.playground-shell .playground-parameters label{color:#292724!important}
+.playground-shell .parameters-heading p,.playground-shell .playground-parameters label>span{color:#77736e!important}
+.playground-shell .parameters-close{border-color:var(--line-strong)!important;background:#f2f1ed!important;color:#292724!important}
+.playground-shell .playground-parameters textarea,.playground-shell .playground-parameters input:not([type=range]){border-color:#d7d2ca!important;background:#fff!important;color:#292724!important}
+.playground-shell .playground-parameters input[type=range]{accent-color:#a96b51!important}
+.playground-shell .parameters-reset{border-color:var(--line)!important;color:#716e69!important}
+.playground-shell .parameters-reset:hover{color:#292724!important}
+.playground-shell .playground-back:focus-visible,.playground-shell .parameter-toggle:focus-visible,.playground-shell .composer-footer button:focus-visible,.playground-shell .parameters-close:focus-visible,.playground-shell .playground-model-row select:focus-visible{outline-color:#a96b51!important}
+@media(max-width:700px){.playground-shell .playground-topbar{background:#eeede8!important}.playground-shell .playground-model-row .model-status{white-space:normal!important;overflow-wrap:anywhere!important}.playground-shell .playground-model-row select{white-space:normal!important}.playground-shell .playground-state{overflow-wrap:anywhere!important}.playground-shell .composer-footer{flex-wrap:wrap!important}}
+@media(prefers-reduced-motion:reduce){.playground-shell .playground-composer,.playground-shell .composer-footer button{transition:none!important}}
