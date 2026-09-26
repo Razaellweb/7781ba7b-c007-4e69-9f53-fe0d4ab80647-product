@@ -4,21 +4,36 @@ import { ApiKeyError, createApiKey, listApiKeys } from "../../../lib/server/api-
 import { ensureMigrated } from "../../../lib/server/migrate";
 
 function errorResponse(error: unknown) {
-  if (error instanceof AuthenticationError || error instanceof ApiKeyError) return NextResponse.json({ error: error.message, code: error.code }, { status: error instanceof ApiKeyError ? error.status : 401 });
-  return NextResponse.json({ error: "API key service is temporarily unavailable", code: "API_KEYS_UNAVAILABLE" }, { status: 503 });
+  if (error instanceof AuthenticationError || error instanceof ApiKeyError) {
+    return NextResponse.json(
+      { error: error.message, code: error.code },
+      { status: error instanceof ApiKeyError ? error.status : 401 },
+    );
+  }
+  return NextResponse.json(
+    { error: "API key service is temporarily unavailable. Please try again.", code: "API_KEYS_UNAVAILABLE" },
+    { status: 503 },
+  );
 }
 
 export async function GET(request: Request) {
-  try { await ensureMigrated(); const account = await authenticatePrivyRequest(request.headers.get("authorization")); return NextResponse.json({ keys: await listApiKeys(account.accountId) }); }
-  catch (error) { return errorResponse(error); }
+  try {
+    await ensureMigrated();
+    const account = await authenticatePrivyRequest(request.headers.get("authorization"));
+    return NextResponse.json({ keys: await listApiKeys(account.accountId) });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function POST(request: Request) {
   try {
     await ensureMigrated();
     const account = await authenticatePrivyRequest(request.headers.get("authorization"));
-    const body = await request.json().catch(() => ({})) as { name?: unknown; expiresAt?: unknown; scopes?: unknown; rateLimitPerMinute?: unknown };
+    const body = await request.json().catch(() => ({})) as { name?: unknown; scopes?: unknown; rateLimitPerMinute?: unknown };
     const created = await createApiKey(account.accountId, body);
-    return NextResponse.json(created, { status: 201 });
-  } catch (error) { return errorResponse(error); }
+    return NextResponse.json(created, { status: 201, headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }

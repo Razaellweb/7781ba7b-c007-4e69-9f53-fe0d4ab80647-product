@@ -1,0 +1,44 @@
+.playground-dashboard {
+  width: 100%;
+  min-height: 100vh;
+}
+.playground-dashboard .compute-main.playground-dashboard-main {
+  flex: 1 1 0;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+.playground-dashboard .playground-shell {
+  min-height: 100vh;
+}
+.playground-dashboard .playground-layout {
+  width: min(100%, 1450px);
+}
+.playground-dashboard .playground-layout.with-parameters {
+  width: min(100%, 1600px);
+}
+.playground-dashboard .playground-signout-link {
+  display: inline-block;
+  padding-top: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+.playground-dashboard .playground-signout-link:hover {
+  color: #f0f6fc;
+}
+@media (max-width: 620px) {
+  .playground-dashboard {
+    display: block;
+  }
+  .playground-dashboard .compute-sidebar {
+    width: 100%;
+  }
+  .playground-dashboard .compute-main.playground-dashboard-main {
+    width: 100%;
+  }
+  .playground-dashboard .playground-shell {
+    min-height: auto;
+  }
+}

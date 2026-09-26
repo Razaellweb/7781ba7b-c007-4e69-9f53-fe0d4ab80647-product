@@ -1,0 +1,201 @@
+.compute-dashboard .compute-main {
+  width: min(1600px, 100%);
+  max-width: 1600px;
+  padding-top: clamp(20px, 3vh, 34px);
+  padding-bottom: 48px;
+}
+.compute-dashboard .compute-header {
+  align-items: center;
+  gap: 20px;
+  padding-bottom: 20px;
+}
+.compute-dashboard .compute-header h1 {
+  font-size: clamp(2.5rem, 4.1vw, 4.2rem);
+  line-height: .91;
+  margin-top: 11px;
+}
+.compute-dashboard .compute-header p {
+  max-width: 560px;
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 12px;
+}
+.compute-dashboard .compute-header-actions {
+  flex: 0 0 auto;
+  padding-top: 8px;
+}
+.compute-dashboard .models-primary {
+  margin-top: 22px;
+}
+.compute-dashboard .compute-section-head {
+  align-items: center;
+  margin-bottom: 12px;
+}
+.compute-dashboard .compute-section-head h2 {
+  font-size: clamp(1.3rem, 2vw, 1.7rem);
+  margin-top: 5px;
+}
+.compute-dashboard .compute-model-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr));
+  grid-auto-rows: auto;
+  gap: 12px;
+}
+.compute-dashboard .compute-model-card {
+  min-height: 196px;
+  height: auto;
+  padding: 15px;
+}
+.compute-dashboard .compute-model-card h3 {
+  min-height: 0;
+  margin: 16px 0 5px;
+  font-size: 17px;
+  line-height: 1.25;
+}
+.compute-dashboard .compute-model-card > p {
+  min-height: 0;
+}
+.compute-dashboard .compute-model-card .model-card-action {
+  margin-top: 14px;
+  padding-top: 10px;
+}
+.compute-dashboard .compute-support-row {
+  margin-top: 22px;
+}
+.compute-dashboard .overview-access-note {
+  display: flex;
+  align-items: center;
+  gap: 12px 16px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid #34475d;
+  background: #111b28;
+  color: #b0bdcc;
+}
+.compute-dashboard .overview-access-note p {
+  flex: 1 1 280px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.compute-dashboard .overview-access-note .compute-retry {
+  margin: 0;
+}
+.compute-dashboard .compute-section-head > a {
+  flex: 0 0 auto;
+}
+.compute-dashboard .compute-empty,
+.compute-dashboard .models-error,
+.compute-dashboard .compute-status-panel {
+  margin-top: 10px;
+}
+.compute-dashboard .compute-status-panel {
+  padding: 18px 20px;
+}
+.compute-dashboard .compute-status-panel h2 {
+  font-size: 19px;
+}
+.compute-dashboard .compute-status-panel p {
+  margin: 6px 0;
+  font-size: 12px;
+}
+.compute-dashboard .model-modal {
+  max-height: calc(100dvh - 32px);
+}
+@media (min-width: 1700px) {
+  .compute-dashboard .compute-main {
+    padding-left: clamp(40px, 3vw, 72px);
+    padding-right: clamp(40px, 3vw, 72px);
+  }
+}
+@media (max-height: 720px) and (min-width: 621px) {
+  .compute-dashboard .compute-main {
+    padding-top: 16px;
+    padding-bottom: 24px;
+  }
+  .compute-dashboard .compute-header {
+    padding-bottom: 13px;
+  }
+  .compute-dashboard .compute-header h1 {
+    font-size: clamp(2.1rem, 4vw, 3.4rem);
+  }
+  .compute-dashboard .compute-header p {
+    margin-top: 8px;
+  }
+  .compute-dashboard .models-primary {
+    margin-top: 14px;
+  }
+  .compute-dashboard .compute-model-card {
+    min-height: 178px;
+  }
+}
+@media (max-width: 850px) {
+  .compute-dashboard .compute-header {
+    align-items: flex-start;
+  }
+  .compute-dashboard .compute-header-actions {
+    max-width: 220px;
+  }
+}
+@media (max-width: 620px) {
+  .compute-dashboard .compute-main {
+    padding: 22px 18px 42px;
+  }
+  .compute-dashboard .compute-header {
+    padding-bottom: 18px;
+  }
+  .compute-dashboard .compute-header h1 {
+    font-size: clamp(2.6rem, 12vw, 3.8rem);
+  }
+  .compute-dashboard .compute-header p {
+    max-width: 42ch;
+    margin-top: 10px;
+  }
+  .compute-dashboard .compute-header-actions {
+    max-width: none;
+    justify-content: flex-start;
+    margin-top: 12px;
+    padding-top: 0;
+  }
+  .compute-dashboard .compute-section-head {
+    align-items: flex-start;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .compute-dashboard .compute-section-head > a {
+    margin-top: 3px;
+  }
+  .compute-dashboard .compute-model-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  }
+  .compute-dashboard .compute-model-card {
+    min-height: 190px;
+  }
+  .compute-dashboard .overview-access-note {
+    align-items: flex-start;
+  }
+  .compute-dashboard .overview-access-note .compute-retry {
+    min-height: 40px;
+  }
+  .compute-dashboard .model-modal-backdrop {
+    padding: 8px;
+    align-items: center;
+  }
+  .compute-dashboard .model-modal {
+    max-height: calc(100dvh - 16px);
+    border: 1px solid #34475d;
+  }
+}
+@media (max-width: 380px) {
+  .compute-dashboard .compute-model-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .compute-dashboard .compute-section-head {
+    flex-direction: column;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .compute-dashboard .compute-model-card {
+    transition: none;
+  }
+}

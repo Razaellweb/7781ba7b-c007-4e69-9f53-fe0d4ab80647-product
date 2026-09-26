@@ -7,7 +7,16 @@ import "../globals.css";
 import "../dashboard/dashboard.css";
 import "./api-keys.css";
 
-type ApiKey = { id: string; name: string; key_prefix: string; scopes: string[]; rate_limit_per_minute: number; created_at: string; last_used_at: string | null; expires_at: string | null; revoked_at: string | null };
+type ApiKey = {
+  id: string;
+  name: string;
+  key_prefix: string;
+  scopes: string[];
+  rate_limit_per_minute: number;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+};
 type PendingAction = { type: "revoke" | "rotate"; key: ApiKey };
 type ApiKeyResult = { key: ApiKey; secret: string };
 type ApiError = { error?: string };
@@ -18,7 +27,6 @@ export default function SettingsPage() {
   const { ready, authenticated, getAccessToken } = usePrivy();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [name, setName] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -49,7 +57,10 @@ export default function SettingsPage() {
     }
   }, [authenticated, headers]);
 
-  useEffect(() => { if (ready && authenticated) void load(); else if (ready) setLoading(false); }, [ready, authenticated, load]);
+  useEffect(() => {
+    if (ready && authenticated) void load();
+    else if (ready) setLoading(false);
+  }, [ready, authenticated, load]);
 
   const create = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -59,13 +70,16 @@ export default function SettingsPage() {
     setMessage(null);
     setSecret("");
     try {
-      const response = await fetch("/api/api-keys", { method: "POST", headers: { ...(await headers()), "Content-Type": "application/json" }, body: JSON.stringify({ name, expiresAt: expiresAt || null }) });
+      const response = await fetch("/api/api-keys", {
+        method: "POST",
+        headers: { ...(await headers()), "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
       const data = await response.json() as ApiKeyResult & ApiError;
       if (!response.ok) throw new Error(data.error ?? "Unable to create API key.");
       setSecret(data.secret);
       setMessage({ tone: "success", text: "API key created. Copy the secret now; it will only be shown once." });
       setName("");
-      setExpiresAt("");
       await load();
     } catch (error) {
       setMessage({ tone: "error", text: error instanceof Error ? error.message : "Unable to create API key." });
@@ -86,8 +100,15 @@ export default function SettingsPage() {
     try {
       const actionUrl = action.type === "rotate" ? `/api/api-keys/${action.key.id}/rotate` : `/api/api-keys/${action.key.id}`;
       const replacementName = `${action.key.name.slice(0, 52)} replacement ${Date.now()}`;
-      const validExpiry = action.key.expires_at && new Date(action.key.expires_at).getTime() > Date.now() ? action.key.expires_at : null;
-      const response = await fetch(actionUrl, { method: "POST", headers: action.type === "rotate" ? { ...(await headers()), "Content-Type": "application/json" } : await headers(), ...(action.type === "rotate" ? { body: JSON.stringify({ name: replacementName, expiresAt: validExpiry, scopes: action.key.scopes, rateLimitPerMinute: action.key.rate_limit_per_minute }) } : {}) });
+      const response = await fetch(actionUrl, {
+        method: "POST",
+        headers: action.type === "rotate"
+          ? { ...(await headers()), "Content-Type": "application/json" }
+          : await headers(),
+        ...(action.type === "rotate"
+          ? { body: JSON.stringify({ name: replacementName, scopes: action.key.scopes, rateLimitPerMinute: action.key.rate_limit_per_minute }) }
+          : {}),
+      });
       const data = await response.json() as (ApiKeyResult & ApiError) | ApiError;
       if (!response.ok) throw new Error(data.error ?? `Unable to ${action.type} API key.`);
       if (action.type === "rotate" && "secret" in data) {
@@ -122,11 +143,52 @@ export default function SettingsPage() {
   };
 
   if (!ready) return <main className="compute-dashboard"><div className="compute-status-panel"><div><h2>Checking your session</h2><p>Preparing secure API key access.</p></div></div></main>;
-  if (!authenticated) return <main className="compute-dashboard"><div className="compute-status-panel"><div><h2>Sign in to manage API keys</h2><p>First-party keys belong to your authenticated Openweight account.</p><Link className="key-link-button" href="/signup">Sign in ↗</Link></div></div></main>;
+  if (!authenticated) return <main className="compute-dashboard"><div className="compute-status-panel"><div><h2>Sign in to manage API keys</h2><p>First-party keys belong to your authenticated Openweight account.</p><Link className="key-link-button" href="/signup">Sign in</Link></div></div></main>;
 
-  return <main className="compute-dashboard api-keys-dashboard"><aside className="compute-sidebar"><Link className="compute-brand key-brand" href="/dashboard"><span className="mark">✦</span><span>OPENWEIGHT</span></Link><div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div><nav><Link href="/dashboard">◉ <span>Overview</span></Link><Link href="/chat">◌ <span>Playground</span></Link><Link className="active" href="/settings">◇ <span>API Keys</span></Link></nav><div className="compute-sidebar-foot"><div>ACCOUNT / API ACCESS</div><small>First-party credentials</small></div></aside><section className="compute-main api-keys-main"><header className="compute-header api-keys-header"><div><div className="compute-eyebrow">WORKSPACE / DEVELOPER ACCESS</div><h1>Keys, kept<br/><em>in your control.</em></h1><p>Create credentials for your own integrations. Secrets are shown once at creation and are never included in the key list.</p></div><div className="compute-header-actions"><span className="compute-access"><i /> PRIVATE TO YOUR ACCOUNT</span><button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? "Refreshing…" : "Refresh ↻"}</button></div></header>
-      <div className="api-keys-layout"><section className="key-panel create-key-panel"><div className="compute-card-label">CREATE A KEY</div><h2>A credential for your integration.</h2><p className="key-panel-copy">Choose a recognizable name. An optional expiry can limit how long the key remains valid.</p><form onSubmit={(event) => void create(event)}><label htmlFor="api-key-name">Key name</label><input id="api-key-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Production integration" required maxLength={80} disabled={busy} /><label htmlFor="api-key-expiry">Expires at <span>Optional · ISO date and time</span></label><input id="api-key-expiry" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} placeholder="2027-01-01T00:00:00Z" disabled={busy} /><button className="key-primary-button" type="submit" disabled={busy || !name.trim()}>{busy ? "Working…" : "Create API key"}<span aria-hidden="true">→</span></button></form>{secret && <div className="one-time-secret" aria-live="polite"><div className="one-time-label">ONE-TIME SECRET</div><strong>Copy it now. This secret will only be shown once.</strong><p>If dismissed or lost, it cannot be retrieved. Rotate this key to obtain a replacement.</p><code>{secret}</code><div className="secret-actions"><button className="key-primary-button" type="button" onClick={() => void copySecret()}>Copy secret</button><button className="key-quiet-button" type="button" onClick={dismissSecret}>Dismiss</button></div></div>}</section>
-      <section className="key-panel key-list-panel"><div className="key-list-heading"><div><div className="compute-card-label">YOUR API KEYS</div><h2>Active and past credentials</h2></div><span className="key-count">{keys.filter((key) => !key.revoked_at).length} active</span></div>{loading ? <div className="key-state" role="status"><span className="key-state-indicator" />Loading your keys…</div> : loadError ? <div className="key-state key-state-error" role="alert"><strong>Keys could not be loaded</strong><p>{loadError}</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div> : keys.length === 0 ? <div className="key-state key-empty"><span className="key-empty-mark">◇</span><strong>No API keys yet.</strong><p>Create a key when you are ready to connect your own integration. Your secret will be displayed only once.</p></div> : <div className="key-list">{keys.map((key) => <article className={`key-row ${key.revoked_at ? "is-revoked" : ""}`} key={key.id}><div className="key-row-main"><div className="key-row-title"><h3>{key.name}</h3><span className={`key-status ${key.revoked_at ? "revoked" : key.expires_at && new Date(key.expires_at).getTime() <= Date.now() ? "expired" : "active"}`}><i />{key.revoked_at ? "Revoked" : key.expires_at && new Date(key.expires_at).getTime() <= Date.now() ? "Expired" : "Active"}</span></div><code className="key-prefix">{key.key_prefix}_••••••••••••</code><p>{key.scopes.join(" · ")} · {key.rate_limit_per_minute} requests/min</p><small>Created {dateLabel(key.created_at)} · Last used {dateLabel(key.last_used_at)}{key.expires_at ? ` · Expires ${dateLabel(key.expires_at)}` : " · No expiry"}</small></div>{!key.revoked_at && <div className="key-row-actions"><button className="key-quiet-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "rotate", key }); }}>Rotate</button><button className="key-danger-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "revoke", key }); }}>Revoke</button></div>}</article>)}</div>}</section></div>
-      {message && <div className={`key-feedback ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div>}
-    </section>{pendingAction && <div className="key-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPendingAction(null); }}><section className="key-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="key-confirm-title" aria-describedby="key-confirm-description"><div className="compute-card-label">CONFIRM KEY {pendingAction.type === "rotate" ? "ROTATION" : "REVOCATION"}</div><h2 id="key-confirm-title">{pendingAction.type === "rotate" ? "Replace this key?" : "Revoke this key?"}</h2><p id="key-confirm-description">{pendingAction.type === "rotate" ? <>A new secret will be issued for <strong>{pendingAction.key.name}</strong>, and this key will be revoked. The replacement secret is shown once.</> : <><strong>{pendingAction.key.name}</strong> will stop working immediately. This action cannot be undone.</>}</p><div className="key-confirm-actions"><button type="button" className="key-quiet-button" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction.type === "rotate" ? "key-primary-button" : "key-danger-button"} disabled={busy} onClick={() => void performAction()}>{busy ? "Working…" : pendingAction.type === "rotate" ? "Rotate key" : "Revoke key"}</button></div></section></div>}</main>;
+  return (
+    <main className="compute-dashboard api-keys-dashboard">
+      <aside className="compute-sidebar">
+        <Link className="compute-brand key-brand" href="/dashboard"><span className="mark">*</span><span>OPENWEIGHT</span></Link>
+        <div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div>
+        <nav>
+          <Link href="/dashboard">Overview</Link>
+          <Link href="/chat">Playground</Link>
+          <Link className="active" href="/settings">API Keys</Link>
+        </nav>
+        <div className="compute-sidebar-foot"><div>ACCOUNT / API ACCESS</div><small>First-party credentials</small></div>
+      </aside>
+      <section className="compute-main api-keys-main">
+        <header className="compute-header api-keys-header">
+          <div>
+            <div className="compute-eyebrow">WORKSPACE / DEVELOPER ACCESS</div>
+            <h1>Keys, kept<br/><em>in your control.</em></h1>
+            <p>Create credentials for your own integrations. Secrets are shown once at creation and are never included in the key list.</p>
+          </div>
+          <div className="compute-header-actions">
+            <span className="compute-access"><i /> PRIVATE TO YOUR ACCOUNT</span>
+            <button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? "Refreshing..." : "Refresh"}</button>
+          </div>
+        </header>
+        <div className="api-keys-layout">
+          <section className="key-panel create-key-panel">
+            <div className="compute-card-label">CREATE A KEY</div>
+            <h2>A credential for your integration.</h2>
+            <p className="key-panel-copy">Choose a recognizable name. Keys stay active until you revoke them.</p>
+            <form onSubmit={(event) => void create(event)}>
+              <label htmlFor="api-key-name">Key name</label>
+              <input id="api-key-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Production integration" required maxLength={80} disabled={busy} />
+              <button className="key-primary-button" type="submit" disabled={busy || !name.trim()}>{busy ? "Working..." : "Create API key"}</button>
+            </form>
+            {secret && <div className="one-time-secret" aria-live="polite"><div className="one-time-label">ONE-TIME SECRET</div><strong>Copy it now. This secret will only be shown once.</strong><p>If dismissed or lost, it cannot be retrieved. Rotate this key to obtain a replacement.</p><code>{secret}</code><div className="secret-actions"><button className="key-primary-button" type="button" onClick={() => void copySecret()}>Copy secret</button><button className="key-quiet-button" type="button" onClick={dismissSecret}>Dismiss</button></div></div>}
+          </section>
+          <section className="key-panel key-list-panel">
+            <div className="key-list-heading"><div><div className="compute-card-label">YOUR API KEYS</div><h2>Active and past credentials</h2></div><span className="key-count">{keys.filter((key) => !key.revoked_at).length} active</span></div>
+            {loading ? <div className="key-state" role="status"><span className="key-state-indicator" />Loading your keys...</div> : loadError ? <div className="key-state key-state-error" role="alert"><strong>Keys could not be loaded</strong><p>{loadError}</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div> : keys.length === 0 ? <div className="key-state key-empty"><span className="key-empty-mark">*</span><strong>No API keys yet.</strong><p>Create a key when you are ready to connect your own integration. Your secret will be displayed only once.</p></div> : <div className="key-list">{keys.map((key) => <article className={`key-row ${key.revoked_at ? "is-revoked" : ""}`} key={key.id}><div className="key-row-main"><div className="key-row-title"><h3>{key.name}</h3><span className={`key-status ${key.revoked_at ? "revoked" : "active"}`}><i />{key.revoked_at ? "Revoked" : "Active"}</span></div><code className="key-prefix">{key.key_prefix}_.............</code><p>{key.scopes.join(" / ")} / {key.rate_limit_per_minute} requests per minute</p><small>Created {dateLabel(key.created_at)} / Last used {dateLabel(key.last_used_at)}</small></div>{!key.revoked_at && <div className="key-row-actions"><button className="key-quiet-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "rotate", key }); }}>Rotate</button><button className="key-danger-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "revoke", key }); }}>Revoke</button></div>}</article>)}</div>}
+          </section>
+        </div>
+        {message && <div className={`key-feedback ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div>}
+      </section>
+      {pendingAction && <div className="key-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPendingAction(null); }}><section className="key-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="key-confirm-title" aria-describedby="key-confirm-description"><div className="compute-card-label">CONFIRM KEY {pendingAction.type === "rotate" ? "ROTATION" : "REVOCATION"}</div><h2 id="key-confirm-title">{pendingAction.type === "rotate" ? "Replace this key?" : "Revoke this key?"}</h2><p id="key-confirm-description">{pendingAction.type === "rotate" ? <>A new secret will be issued for <strong>{pendingAction.key.name}</strong>, and this key will be revoked. The replacement secret is shown once.</> : <><strong>{pendingAction.key.name}</strong> will stop working immediately. This action cannot be undone.</>}</p><div className="key-confirm-actions"><button type="button" className="key-quiet-button" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction.type === "rotate" ? "key-primary-button" : "key-danger-button"} disabled={busy} onClick={() => void performAction()}>{busy ? "Working..." : pendingAction.type === "rotate" ? "Rotate key" : "Revoke key"}</button></div></section></div>}
+    </main>
+  );
 }
