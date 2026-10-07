@@ -94,9 +94,9 @@
   flex-wrap: wrap;
   margin-top: 16px;
   padding: 12px 14px;
-  border: 1px solid #34475d;
-  background: #111b28;
-  color: #b0bdcc;
+  border: 1px solid #494950;
+  background: #212124;
+  color: #bdbdbf;
 }
 .compute-dashboard .overview-access-note p {
   flex: 1 1 280px;
@@ -209,7 +209,7 @@
   }
   .compute-dashboard .model-modal {
     max-height: calc(100dvh - 16px);
-    border: 1px solid #34475d;
+    border: 1px solid #494950;
   }
 }
 @media (max-width: 380px) {
