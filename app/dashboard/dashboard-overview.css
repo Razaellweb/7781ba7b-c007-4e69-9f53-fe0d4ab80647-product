@@ -225,36 +225,3 @@
     transition: none;
   }
 }
-
-/* Overview-only charcoal palette with restrained spectral highlights. */
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-header h1 em,
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-note-card h2 em {
-  color: #a9bac2 !important;
-}
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card .model-card-action,
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .model-detail-status a {
-  color: #9bdcff !important;
-}
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .model-glyph {
-  background: #172a35 !important;
-  color: #9bdcff !important;
-}
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-balance-card:after {
-  background: linear-gradient(90deg, transparent, #168ff055 24%, #65dcff80 42%, #f2d8b477 53%, #ff966b70 69%, transparent) !important;
-  opacity: .42 !important;
-}
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card:hover,
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) .compute-model-card:focus-visible {
-  border-color: #83d8ff !important;
-  outline-color: #83d8ff !important;
-  box-shadow: 0 0 24px #45b9e51c, 0 12px 30px #0005 !important;
-}
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) :is(a, button, input, select, textarea):focus-visible {
-  outline: 2px solid #a4e3ff !important;
-  outline-offset: 3px !important;
-  box-shadow: 0 0 0 4px #38a9dd55 !important;
-}
-.compute-dashboard:not(.api-keys-dashboard):not(.playground-dashboard) :is(button, input, select, textarea):disabled {
-  opacity: .56 !important;
-  cursor: not-allowed !important;
-}

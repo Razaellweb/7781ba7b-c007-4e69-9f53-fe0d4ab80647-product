@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import Link from "next/link";
-import WorkspaceSidebar from "../../components/WorkspaceSidebar";
 import "../globals.css";
 import "../dashboard/dashboard.css";
 import "./api-keys.css";
@@ -163,7 +162,16 @@ export default function SettingsPage() {
 
   return (
     <main className="compute-dashboard api-keys-dashboard">
-      <WorkspaceSidebar active="api-keys" footerLabel="ACCOUNT / API ACCESS" footerDetail="First-party credentials" />
+      <aside className="compute-sidebar">
+        <Link className="compute-brand key-brand" href="/dashboard"><span className="mark">*</span><span>OPENWEIGHT</span></Link>
+        <div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div>
+        <nav>
+          <Link href="/dashboard">Overview</Link>
+          <Link href="/chat">Playground</Link>
+          <Link className="active" href="/settings">API Keys</Link>
+        </nav>
+        <div className="compute-sidebar-foot"><div>ACCOUNT / API ACCESS</div><small>First-party credentials</small></div>
+      </aside>
       <section className="compute-main api-keys-main">
         <header className="compute-header api-keys-header">
           <div>
