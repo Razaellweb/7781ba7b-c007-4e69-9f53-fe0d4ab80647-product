@@ -662,10 +662,3 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
-`}</style>
-  </main>;
-}
-
-function ParameterRange({ label, value, onChange, min, max, step, enabled }: { label: string; value: string; onChange: (value: string) => void; min: string; max: string; step: string; enabled: boolean }) { return <label className={!enabled ? "parameter-disabled" : ""}>{label}<span>{enabled ? value || "Model default" : "Not supported"}</span><input type="range" min={min} max={max} step={step} value={value || min} onChange={(event) => onChange(event.target.value)} disabled={!enabled} /></label>; }
-
-export default function PlaygroundPage() { return <Suspense fallback={<main className="playground-gate">Loading Playground...</main>}><PlaygroundContent /></Suspense>; }
