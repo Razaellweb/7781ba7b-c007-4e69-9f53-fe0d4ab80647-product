@@ -1,0 +1,27 @@
+.dashboard-route-shell {
+  display: flex;
+  min-height: 100vh;
+  background: #0c1117;
+}
+.dashboard-route-shell > .compute-sidebar {
+  flex: 0 0 238px;
+}
+.dashboard-route-content {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.dashboard-route-content > .compute-dashboard > .compute-sidebar {
+  display: none;
+}
+.dashboard-route-content > .compute-dashboard {
+  min-height: 100vh;
+}
+@media (max-width: 620px) {
+  .dashboard-route-shell {
+    display: block;
+  }
+  .dashboard-route-shell > .compute-sidebar {
+    width: 100%;
+    min-height: auto;
+  }
+}
