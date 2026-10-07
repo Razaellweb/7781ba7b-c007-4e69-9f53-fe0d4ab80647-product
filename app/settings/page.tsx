@@ -163,7 +163,7 @@ export default function SettingsPage() {
   return (
     <main className="compute-dashboard api-keys-dashboard">
       <aside className="compute-sidebar">
-        <Link className="compute-brand key-brand" href="/dashboard"><span className="mark">*</span><span>OPENWEIGHT</span></Link>
+        <Link className="compute-brand key-brand" href="/dashboard"><span className="mark"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><span>OPENWEIGHT</span></Link>
         <div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div>
         <nav>
           <Link href="/dashboard">Overview</Link>

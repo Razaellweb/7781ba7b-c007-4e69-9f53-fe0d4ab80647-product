@@ -17,9 +17,9 @@ export const metadata: Metadata = {
   title: "Openweight Systems",
   description: "Curated open-weight intelligence with measured compute.",
   icons: {
-    icon: brandIcon,
+    icon: [{ url: brandIcon, type: "image/png" }],
     shortcut: brandIcon,
-    apple: brandIcon,
+    apple: [{ url: brandIcon, type: "image/png" }],
   },
 };
 

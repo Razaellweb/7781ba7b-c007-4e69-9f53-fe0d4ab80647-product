@@ -397,3 +397,249 @@
 @media (prefers-reduced-motion: reduce) {
   .playground-dashboard .playground-shell * { scroll-behavior: auto; }
 }
+
+/* Quiet, single-source access feedback and clearer workspace hierarchy. */
+.playground-dashboard .topbar-status .access-pill {
+  display: inline-flex;
+}
+.playground-dashboard .access-summary {
+  display: none;
+}
+.playground-dashboard .access-verified-note {
+  display: none;
+}
+.playground-dashboard .access-context {
+  min-height: 34px;
+  justify-content: flex-end;
+  padding: 6px 0;
+  border-bottom-color: #2e3030;
+}
+.playground-dashboard .access-context:has(.verify-button) {
+  min-height: 38px;
+}
+.playground-dashboard .playground-heading {
+  padding-bottom: 16px;
+}
+.playground-dashboard .playground-heading h1 {
+  font-size: clamp(38px, 4.5vw, 58px);
+}
+.playground-dashboard .parameter-toggle,
+.playground-dashboard .history-toggle,
+.playground-dashboard .new-conversation,
+.playground-dashboard .verify-button {
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease;
+}
+.playground-dashboard .parameter-toggle:hover,
+.playground-dashboard .history-toggle:hover,
+.playground-dashboard .verify-button:hover:not(:disabled) {
+  border-color: #a77a65;
+  background: #211b18;
+}
+.playground-dashboard .new-conversation:hover:not(:disabled) {
+  border-color: #d09173;
+  background: #bd7b60;
+}
+.playground-dashboard .playground-model-row select {
+  min-height: 44px;
+  border-color: #484947;
+  border-radius: 8px;
+  background-color: #141515;
+  font-size: 13px;
+}
+.playground-dashboard .conversation-toolbar {
+  min-height: 48px;
+  padding-bottom: 5px;
+}
+.playground-dashboard .playground-messages {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding-block: 18px;
+}
+.playground-dashboard .playground-empty {
+  max-width: 660px;
+  margin: auto;
+  padding: 24px 16px;
+}
+.playground-dashboard .playground-empty h2 {
+  font-size: clamp(23px, 2.5vw, 31px);
+}
+.playground-dashboard .playground-empty p {
+  max-width: 580px;
+  font-size: 13px;
+}
+.playground-dashboard .empty-mark {
+  width: 48px;
+  height: 48px;
+  border: 1px solid #39271f;
+  border-radius: 15px;
+}
+.playground-dashboard .playground-composer {
+  border-color: #4b4e4d;
+  border-radius: 11px;
+  box-shadow: 0 10px 32px #0002;
+}
+.playground-dashboard .playground-composer:focus-within {
+  border-color: #a77a65;
+  box-shadow: 0 0 0 1px #a77a6533, 0 10px 32px #0002;
+}
+.playground-dashboard .playground-composer textarea {
+  min-height: 82px;
+  padding: 15px 17px;
+  font-size: 14px;
+}
+.playground-dashboard .composer-footer {
+  min-height: 46px;
+  padding-inline: 15px 10px;
+}
+.playground-dashboard .playground-state {
+  max-width: 960px;
+  width: 100%;
+  margin-inline: auto;
+}
+.playground-dashboard .playground-footnote {
+  text-align: center;
+  line-height: 1.5;
+}
+.playground-dashboard .history-panel {
+  max-width: 960px;
+  width: 100%;
+  align-self: center;
+  border-color: #363837;
+}
+@media (max-width: 700px) {
+  .playground-dashboard .playground-layout,
+  .playground-dashboard .playground-layout.with-parameters {
+    gap: 7px;
+    padding: 10px 12px max(10px, env(safe-area-inset-bottom));
+  }
+  .playground-dashboard .playground-heading {
+    padding-bottom: 7px;
+  }
+  .playground-dashboard .playground-heading h1 {
+    font-size: clamp(30px, 8vw, 39px);
+  }
+  .playground-dashboard .playground-controls,
+  .playground-dashboard .playground-main,
+  .playground-dashboard .playground-layout {
+    min-width: 0;
+  }
+  .playground-dashboard .playground-model-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 7px 9px;
+    padding: 7px 0;
+  }
+  .playground-dashboard .playground-model-row label {
+    min-width: 0;
+  }
+  .playground-dashboard .playground-model-row select {
+    min-height: 40px;
+    padding: 7px 30px 7px 9px;
+    font-size: 11px;
+  }
+  .playground-dashboard .model-status {
+    max-width: 105px;
+    font-size: 8px;
+    white-space: normal;
+    line-height: 1.25;
+  }
+  .playground-dashboard .selected-model-name {
+    overflow-wrap: anywhere;
+  }
+  .playground-dashboard .access-context {
+    min-height: 30px;
+    padding: 4px 0;
+  }
+  .playground-dashboard .access-context:has(.verify-button) {
+    min-height: 34px;
+  }
+  .playground-dashboard .verify-button {
+    flex: 0 0 auto;
+    max-width: 45%;
+    white-space: nowrap;
+    padding: 6px 8px;
+    font-size: 8px;
+  }
+  .playground-dashboard .conversation-toolbar {
+    min-height: 38px;
+    padding-top: 5px;
+    padding-bottom: 2px;
+  }
+  .playground-dashboard .conversation-toolbar > div:first-child {
+    min-width: 0;
+  }
+  .playground-dashboard .conversation-model {
+    max-width: 42vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .playground-dashboard .conversation-actions {
+    flex: 0 0 auto;
+  }
+  .playground-dashboard .history-toggle,
+  .playground-dashboard .new-conversation {
+    white-space: nowrap;
+  }
+  .playground-dashboard .playground-messages {
+    padding: 6px 2px;
+  }
+  .playground-dashboard .playground-empty {
+    padding: 8px 3px;
+  }
+  .playground-dashboard .playground-empty h2 {
+    font-size: clamp(16px, 4.5vw, 20px);
+  }
+  .playground-dashboard .playground-empty p {
+    font-size: 9px;
+  }
+  .playground-dashboard .playground-state {
+    max-height: 40px;
+    font-size: 8px;
+  }
+  .playground-dashboard .playground-composer textarea {
+    min-height: 54px;
+    max-height: 17dvh;
+    padding: 9px 10px;
+    font-size: 12px;
+  }
+  .playground-dashboard .composer-footer {
+    min-height: 36px;
+    padding: 4px 6px 4px 9px;
+  }
+  .playground-dashboard .composer-footer > span {
+    max-width: 68%;
+    line-height: 1.35;
+  }
+  .playground-dashboard .composer-footer button {
+    flex: 0 0 auto;
+  }
+  .playground-dashboard .playground-footnote {
+    display: none;
+  }
+}
+@media (max-width: 390px) {
+  .playground-dashboard .playground-layout,
+  .playground-dashboard .playground-layout.with-parameters {
+    padding-inline: 9px;
+  }
+  .playground-dashboard .conversation-model {
+    max-width: 33vw;
+  }
+  .playground-dashboard .conversation-toolbar .playground-kicker {
+    letter-spacing: .06em;
+  }
+  .playground-dashboard .history-toggle,
+  .playground-dashboard .new-conversation {
+    padding-inline: 6px;
+    font-size: 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .playground-dashboard .parameter-toggle,
+  .playground-dashboard .history-toggle,
+  .playground-dashboard .new-conversation,
+  .playground-dashboard .verify-button {
+    transition: none;
+  }
+}
