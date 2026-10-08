@@ -163,11 +163,11 @@ export default function SettingsPage() {
   return (
     <main className="compute-dashboard api-keys-dashboard">
       <aside className="compute-sidebar">
-        <Link className="compute-brand key-brand" href="/dashboard"><span className="mark"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><span>OPENWEIGHT</span></Link>
+        <Link className="compute-brand key-brand" href="/"><span className="mark"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><span>OPENWEIGHT</span></Link>
         <div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div>
         <nav>
           <Link href="/dashboard">Overview</Link>
-          <Link href="/chat">Playground</Link>
+          <Link href="/playground">Playground</Link>
           <Link className="active" href="/settings">API Keys</Link>
         </nav>
         <div className="compute-sidebar-foot"><div>ACCOUNT / API ACCESS</div><small>First-party credentials</small></div>
@@ -184,6 +184,20 @@ export default function SettingsPage() {
             <button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? "Refreshing..." : "Refresh"}</button>
           </div>
         </header>
+        <section className="chat-api-guide" aria-labelledby="chat-api-guide-title">
+          <div className="chat-api-guide-heading">
+            <div className="compute-card-label">CHAT COMPLETIONS API</div>
+            <h2 id="chat-api-guide-title">Your key, your integration.</h2>
+          </div>
+          <div className="chat-api-endpoint"><span className="chat-api-method">POST</span><code>/api/v1/chat/completions</code><span className="chat-api-auth">Bearer API key</span></div>
+          <div className="chat-api-details">
+            <pre className="chat-api-example"><code>{`{
+  "model": "auto",
+  "messages": [{ "role": "user", "content": "Hello" }]
+}`}</code></pre>
+            <div className="chat-api-notes"><p>Send JSON with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a curated model ID</span><span><strong>stream</strong> may be set to <code>true</code> for streamed responses</span></div>
+          </div>
+        </section>
         <div className="api-keys-layout">
           <section className="key-panel create-key-panel">
             <div className="compute-card-label">CREATE A KEY</div>
