@@ -177,7 +177,7 @@ export default function DashboardPage() {
   useEffect(() => { if (ready && !authenticated) router.replace("/signup"); }, [ready, authenticated, router]);
   useEffect(() => { if (ready && authenticated) { void loadData(false); void loadRegistry(); } }, [ready, authenticated, loadData, loadRegistry]);
   useEffect(() => { if (!selectedModel) return; const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") closeModelDetails(); }; window.addEventListener("keydown", onKeyDown); return () => window.removeEventListener("keydown", onKeyDown); }, [closeModelDetails, selectedModel]);
-  useEffect(() => { if (!copyNotice) return; const timer = window.setTimeout(() => setCopyNotice(""); }, 3000); return () => window.clearTimeout(timer); }, [copyNotice]);
+  useEffect(() => { if (!copyNotice) return; const timer = window.setTimeout(() => setCopyNotice(""), 3000); return () => window.clearTimeout(timer); }, [copyNotice]);
 
   if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>{ready ? "Redirecting to sign in…" : "Verifying your session…"}</p></div></main>;
   const statusLabels: Record<Eligibility, string> = { loading: "CHECKING", verification_required: "NOT VERIFIED", eligible: "ELIGIBLE", insufficient_balance: "NOT ELIGIBLE", wrong_network: "WRONG NETWORK", verification_error: "RETRY CHECK", unauthenticated: "AUTH REQUIRED" };
