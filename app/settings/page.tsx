@@ -188,6 +188,7 @@ export default function SettingsPage() {
           <div className="chat-api-guide-heading">
             <div className="compute-card-label">CHAT COMPLETIONS API</div>
             <h2 id="chat-api-guide-title">Your key, your integration.</h2>
+            <div className="chat-api-base"><span>BASE URL</span><a href="https://openweight.systems" target="_blank" rel="noreferrer">https://openweight.systems</a></div>
           </div>
           <div className="chat-api-endpoint"><span className="chat-api-method">POST</span><code>/api/v1/chat/completions</code><span className="chat-api-auth">Bearer API key</span></div>
           <div className="chat-api-details">
@@ -195,7 +196,7 @@ export default function SettingsPage() {
   "model": "auto",
   "messages": [{ "role": "user", "content": "Hello" }]
 }`}</code></pre>
-            <div className="chat-api-notes"><p>Send JSON with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a curated model ID</span><span><strong>stream</strong> may be set to <code>true</code> for streamed responses</span></div>
+            <div className="chat-api-notes"><p>Send a JSON request with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a curated model ID.</span><span><strong>messages</strong> use system, user, or assistant roles with text content.</span><span><strong>stream</strong> may be set to <code>true</code> for streamed event responses.</span></div>
           </div>
         </section>
         <div className="api-keys-layout">
