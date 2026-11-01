@@ -90,9 +90,6 @@
 .playground-dashboard .selected-model-name {
   padding-bottom: 10px;
 }
-.playground-dashboard .access-context {
-  padding: 9px 0;
-}
 .playground-dashboard .conversation-toolbar {
   padding-top: 11px;
 }
@@ -254,31 +251,6 @@
     padding: 0;
     font-size: 8px;
   }
-  .playground-dashboard .access-context {
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 0;
-  }
-  .playground-dashboard .access-summary {
-    align-items: center;
-    gap: 7px;
-  }
-  .playground-dashboard .access-indicator {
-    margin-top: 0;
-  }
-  .playground-dashboard .access-summary b {
-    font-size: 10px;
-  }
-  .playground-dashboard .access-summary small,
-  .playground-dashboard .access-verified-note {
-    display: none;
-  }
-  .playground-dashboard .verify-button {
-    padding: 7px 9px;
-    min-height: 32px;
-    font-size: 9px;
-  }
   .playground-dashboard .conversation-toolbar {
     flex-direction: row;
     align-items: center;
@@ -374,8 +346,6 @@
   .playground-dashboard .compute-sidebar { padding-inline: 11px; }
   .playground-dashboard .playground-layout,
   .playground-dashboard .playground-layout.with-parameters { padding-inline: 10px; }
-  .playground-dashboard .access-context { gap: 4px; }
-  .playground-dashboard .verify-button { font-size: 8px; }
   .playground-dashboard .composer-footer > span { max-width: 56%; }
 }
 @media (max-height: 620px) and (min-width: 701px) {
@@ -387,7 +357,6 @@
   .playground-dashboard .playground-heading { padding-bottom: 7px; }
   .playground-dashboard .playground-heading h1 { font-size: 34px; margin-top: 4px; }
   .playground-dashboard .playground-model-row { padding-block: 6px; }
-  .playground-dashboard .access-context { padding-block: 5px; }
   .playground-dashboard .playground-composer textarea { min-height: 52px; }
   .playground-dashboard .playground-footnote { display: none; }
 }
@@ -395,25 +364,7 @@
   .playground-dashboard .playground-shell * { scroll-behavior: auto; }
 }
 
-/* Quiet, single-source access feedback and clearer workspace hierarchy. */
-.playground-dashboard .topbar-status .access-pill {
-  display: inline-flex;
-}
-.playground-dashboard .access-summary {
-  display: none;
-}
-.playground-dashboard .access-verified-note {
-  display: none;
-}
-.playground-dashboard .access-context {
-  min-height: 34px;
-  justify-content: flex-end;
-  padding: 6px 0;
-  border-bottom-color: #2e3030;
-}
-.playground-dashboard .access-context:has(.verify-button) {
-  min-height: 38px;
-}
+/* Clearer workspace hierarchy and a balanced, warning-free composer area. */
 .playground-dashboard .playground-heading {
   padding-bottom: 16px;
 }
@@ -422,13 +373,11 @@
 }
 .playground-dashboard .parameter-toggle,
 .playground-dashboard .history-toggle,
-.playground-dashboard .new-conversation,
-.playground-dashboard .verify-button {
+.playground-dashboard .new-conversation {
   transition: background-color .18s ease, border-color .18s ease, color .18s ease;
 }
 .playground-dashboard .parameter-toggle:hover,
-.playground-dashboard .history-toggle:hover,
-.playground-dashboard .verify-button:hover:not(:disabled) {
+.playground-dashboard .history-toggle:hover {
   border-color: #a77a65;
   background: #211b18;
 }
@@ -543,20 +492,6 @@
   .playground-dashboard .selected-model-name {
     overflow-wrap: anywhere;
   }
-  .playground-dashboard .access-context {
-    min-height: 30px;
-    padding: 4px 0;
-  }
-  .playground-dashboard .access-context:has(.verify-button) {
-    min-height: 34px;
-  }
-  .playground-dashboard .verify-button {
-    flex: 0 0 auto;
-    max-width: 45%;
-    white-space: nowrap;
-    padding: 6px 8px;
-    font-size: 8px;
-  }
   .playground-dashboard .conversation-toolbar {
     min-height: 38px;
     padding-top: 5px;
@@ -635,30 +570,26 @@
 @media (prefers-reduced-motion: reduce) {
   .playground-dashboard .parameter-toggle,
   .playground-dashboard .history-toggle,
-  .playground-dashboard .new-conversation,
-  .playground-dashboard .verify-button {
+  .playground-dashboard .new-conversation {
     transition: none;
   }
 }
 
-/* Remove only the requested Playground affordances and reclaim their space. */
-.playground-dashboard .topbar-status,
-.playground-dashboard .parameter-toggle,
-.playground-dashboard .model-status,
-.playground-dashboard .selected-model-name,
-.playground-dashboard .access-context {
-  display: none !important;
+/* Verification affordances are intentionally absent from this workspace; keep the
+   model row on a single balanced line now that the access row is gone. */
+.playground-dashboard .playground-controls {
+  border-top: 1px solid #303232;
 }
 .playground-dashboard .playground-model-row {
-  grid-template-columns: minmax(180px, 360px);
+  grid-template-columns: minmax(180px, 360px) auto minmax(0, 1fr);
 }
 @media (max-width: 900px) {
   .playground-dashboard .playground-model-row {
-    grid-template-columns: minmax(170px, 1fr);
+    grid-template-columns: minmax(170px, 1fr) auto;
   }
 }
 @media (max-width: 700px) {
   .playground-dashboard .playground-model-row {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 }

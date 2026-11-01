@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest, AuthenticationError } from "../../../lib/server/auth";
-import { verifyHolder } from "../../../lib/server/holder";
-import { reserveCompute, settleReservation, reportFinalizationFailure, AccountingError } from "../../../lib/server/accounting";
+import { reserveCompute, settleReservation, reportFinalizationFailure, ensureDefaultAllowance, AccountingError } from "../../../lib/server/accounting";
 import { query } from "../../../lib/server/db";
 import { rateLimit, cacheGet } from "../../../lib/server/redis";
 import { getInferenceProvider } from "../../../lib/server/provider";
@@ -33,6 +32,9 @@ export async function POST(request: Request) {
   const requestId = crypto.randomUUID();
   try {
     await ensureMigrated();
+    // Authorization is identity-based: a verified Privy session or a valid
+    // first-party API key is sufficient. No token-balance, holder-status, or
+    // ownership eligibility gate runs before inference any more.
     const account = await authenticateRequest(request.headers.get("authorization"), "chat:write");
     const isApiKey = Boolean(account.apiKeyId);
     if (!(await rateLimit(`inference:user:${account.accountId}`, userRateLimit(), 60))) return NextResponse.json({ error: "Your account inference rate limit has been reached. Try again shortly.", code: "USER_RATE_LIMITED", requestId }, { status: 429 });
@@ -46,8 +48,6 @@ export async function POST(request: Request) {
     const model: ModelRow | null = !requestedSlug || requestedSlug === "auto" ? await pickAutoModel() : await getActiveModel(requestedSlug);
     if (!model) return NextResponse.json({ error: "That model is not available in the curated registry.", code: "UNAVAILABLE_MODEL", requestId }, { status: 400 });
     const parameters = parseParameters(body, model, requestId); if (parameters instanceof Response) return parameters;
-    const eligibility = await verifyHolder(account);
-    if (eligibility.state !== "eligible") return NextResponse.json({ error: "Holder eligibility must be confirmed before inference", code: eligibility.state, requestId }, { status: 403 });
     const health = await getInferenceProvider().health();
     if (!health.healthy) return NextResponse.json({ error: "Inference is temporarily degraded. Please try again shortly.", code: "PROVIDER_DEGRADED", requestId }, { status: 503 });
     const derivedTitle = text.slice(0, 60);
@@ -67,7 +67,13 @@ export async function POST(request: Request) {
     const providerParameters = { ...parameters }; delete (providerParameters as Record<string, unknown>).systemPrompt;
     const contextMessages: InferenceMessage[] = [systemPrompt, ...priorRows.map((r) => ({ role: r.role, content: r.content })), { role: "user", content: text }];
     await query(`INSERT INTO messages (conversation_id,account_id,role,content) VALUES ($1,$2,'user',$3)`, [conversationId, account.accountId, text]);
-    try { await reserveCompute(account.accountId, operationKey, cfg.reservationCapMicroUsd, { apiKeyId: account.apiKeyId, channel }); } catch (error) { if (error instanceof AccountingError) { const status = error.code === "ALLOWANCE_MISSING" || error.code === "ALLOWANCE_EXPIRED" ? 403 : 402; return NextResponse.json({ error: error.message, code: error.code, requestId }, { status }); } throw error; }
+    try {
+      // The compute allowance is a separately handled mechanism: the configured
+      // default grant is provisioned for any verified identity, and it never
+      // depends on token holdings or a legacy holder-status value.
+      await ensureDefaultAllowance(account.accountId);
+      await reserveCompute(account.accountId, operationKey, cfg.reservationCapMicroUsd, { apiKeyId: account.apiKeyId, channel });
+    } catch (error) { if (error instanceof AccountingError) { const status = error.code === "ALLOWANCE_MISSING" || error.code === "ALLOWANCE_EXPIRED" ? 403 : 402; return NextResponse.json({ error: error.message, code: error.code, requestId }, { status }); } throw error; }
     const provider = getInferenceProvider();
     const stream = new ReadableStream({ async start(controller) { let output = ""; let settled = false; let deltas = 0; let stopRequested = false; const send = (obj: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); const finalize = async (status: "complete" | "cancelled" | "failed" | "uncertain", providerCost: bigint | null, usage: { inputTokens: number | null; outputTokens: number | null } | null, uncertain: boolean) => { if (settled) return; const correlationId = `${requestId}:${inferenceId}`; const userDebit = providerCost != null && !uncertain ? computeUserDebit(providerCost, policy) : 0n; const cappedDebit = userDebit > cfg.reservationCapMicroUsd ? cfg.reservationCapMicroUsd : userDebit; const isUncertain = uncertain || (status !== "complete" && providerCost == null && output.length > 0); try { await settleReservation(operationKey, cappedDebit, providerCost, isUncertain, { inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens, eventType: status === "complete" ? "provider_usage" : status === "cancelled" ? "cancelled" : status === "failed" ? "provider_failure" : "uncertain", markupMicro: policy.markupMicro }); } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "settlement", error); throw error; } try { if (output) await query(`INSERT INTO messages (inference_id,conversation_id,account_id,role,content,partial,model_slug,provider_model,input_tokens,output_tokens,provider_cost_micro_usd,user_debit_micro_usd) VALUES ($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (inference_id) WHERE role='assistant' DO NOTHING`, [inferenceId, conversationId, account.accountId, output, status !== "complete", model.slug, model.provider_model_slug, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString()]); } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "assistant_persistence", error); throw error; } try { await query(`UPDATE inference_records SET status=$2, input_tokens=$3, output_tokens=$4, provider_cost_micro_usd=$5, user_debit_micro_usd=$6, reconciliation_required=$7, completed_at=now() WHERE operation_key=$1`, [operationKey, status, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString(), isUncertain]); await query(`UPDATE conversations SET updated_at=now() WHERE id=$1`, [conversationId]); } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "inference_update", error); throw error; } settled = true; };
       try { for await (const chunk of provider.stream({ operationKey, model: model.provider_model_slug, messages: contextMessages, parameters: providerParameters })) { if (chunk.type === "delta") { output += chunk.text; deltas += 1; send({ type: "delta", text: chunk.text }); if (deltas % 20 === 0 && await cacheGet<boolean>(`stop:${operationKey}`).catch(() => null)) { stopRequested = true; break; } } else if (chunk.type === "complete") { await finalize("complete", chunk.usage.providerCostMicroUsd, { inputTokens: chunk.usage.inputTokens, outputTokens: chunk.usage.outputTokens }, chunk.usage.uncertain); send({ type: "complete", conversationId, requestId }); } else if (chunk.type === "error") { await finalize("failed", null, null, false); send({ type: "error", code: `INFERENCE_${chunk.error.code.toUpperCase()}`, error: chunk.error.message, retryable: chunk.error.retryable, requestId }); } } if (stopRequested) { await finalize("cancelled", null, null, true); send({ type: "cancelled", conversationId, requestId }); } } catch (error) { console.error(JSON.stringify({ event: "inference_stream_finalization_failed", operationKey, inferenceId, requestId, error: error instanceof Error ? error.name : "UNKNOWN_ERROR" })); send({ type: "error", code: "INFERENCE_UNAVAILABLE", error: "Inference could not be completed.", retryable: true, requestId }); } finally { if (!settled) { try { await finalize("failed", null, null, false); } catch (error) { console.error(JSON.stringify({ event: "inference_finalization_failed", operationKey, inferenceId, requestId, error: error instanceof Error ? error.name : "UNKNOWN_ERROR" })); } } controller.close(); } } });

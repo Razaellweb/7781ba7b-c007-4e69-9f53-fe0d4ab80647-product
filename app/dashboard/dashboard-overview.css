@@ -84,28 +84,18 @@
   margin-top: 14px;
   padding-top: 10px;
 }
+/* The allowance card is the only card in the support row, so it owns the width. */
 .compute-dashboard .compute-support-row {
   margin-top: 22px;
-}
-.compute-dashboard .overview-access-note {
   display: flex;
-  align-items: center;
-  gap: 12px 16px;
-  flex-wrap: wrap;
-  margin-top: 16px;
-  padding: 12px 14px;
-  border: 1px solid #494950;
-  background: #212124;
-  color: #bdbdbf;
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 14px;
 }
-.compute-dashboard .overview-access-note p {
-  flex: 1 1 280px;
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-}
-.compute-dashboard .overview-access-note .compute-retry {
-  margin: 0;
+.compute-dashboard .compute-support-row .compute-balance-card {
+  width: 100%;
+  max-width: none;
+  flex: 1 1 auto;
 }
 .compute-dashboard .compute-section-head > a {
   flex: 0 0 auto;
@@ -197,11 +187,11 @@
   .compute-dashboard .compute-model-card {
     min-height: 190px;
   }
-  .compute-dashboard .overview-access-note {
-    align-items: flex-start;
+  .compute-dashboard .compute-support-row {
+    flex-direction: column;
   }
-  .compute-dashboard .overview-access-note .compute-retry {
-    min-height: 40px;
+  .compute-dashboard .compute-support-row .compute-balance-card {
+    width: 100%;
   }
   .compute-dashboard .model-modal-backdrop {
     padding: 8px;

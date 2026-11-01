@@ -34,15 +34,15 @@ export default function ApiPlayground() {
 }`}</code></pre>
           <div className="api-notes">
             <p>Messages support <code>system</code>, <code>user</code>, and <code>assistant</code> roles with text content.</p>
-            <p>Inference requires verified holder eligibility and available compute. Usage is settled from provider-reported usage.</p>
+            <p>Inference requires a valid API key and available compute. Usage is settled from provider-reported usage.</p>
           </div>
         </div>
       </div>
       <div className="api-playground-footer">
         <span>Explore the interactive simulation or manage your account keys.</span>
         <div className="api-playground-links">
-          <Link className="api-simulation-link" href="/playground">OPEN PLAYGROUND ↗</Link>
-          <Link className="api-key-link" href="/settings">MANAGE API KEYS ↗</Link>
+          <Link className="api-simulation-link" href="/playground">OPEN PLAYGROUND \u2197</Link>
+          <Link className="api-key-link" href="/settings">MANAGE API KEYS \u2197</Link>
         </div>
       </div>
     </section>

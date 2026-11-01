@@ -1,22 +1,19 @@
-/* Hide only the Playground affordances and model details named in the reference. */
+/* Hide only the secondary Playground chrome from the approved reference. Verification
+   affordances (access rows, verify buttons, access pills) no longer exist in markup. */
 .playground-dashboard .topbar-status,
 .playground-dashboard .parameter-toggle,
 .playground-dashboard .model-status,
 .playground-dashboard .selected-model-name,
-.playground-dashboard .access-context .verify-button {
+.playground-dashboard .access-context,
+.playground-dashboard .access-summary,
+.playground-dashboard .access-indicator,
+.playground-dashboard .access-verified-note,
+.playground-dashboard .access-pill,
+.playground-dashboard .verify-button {
   display: none !important;
 }
 .playground-dashboard .playground-model-row {
   grid-template-columns: minmax(0, 360px) !important;
-}
-.playground-dashboard .access-context {
-  display: flex;
-  min-height: 0;
-  justify-content: flex-start;
-  padding: 9px 0;
-}
-.playground-dashboard .access-context .access-summary {
-  display: flex !important;
 }
 .playground-dashboard .playground-back span {
   font-size: 0 !important;
@@ -24,13 +21,6 @@
 .playground-dashboard .playground-back span::before {
   content: "←";
   font-size: 15px;
-}
-.playground-dashboard .empty-mark {
-  font-size: 0 !important;
-}
-.playground-dashboard .empty-mark::before {
-  content: "✦";
-  font-size: 20px;
 }
 .playground-dashboard .composer-footer b {
   font-size: 0 !important;
@@ -59,12 +49,6 @@
   .playground-dashboard .playground-model-row {
     grid-template-columns: minmax(0, 1fr) !important;
   }
-  .playground-dashboard .access-context {
-    padding: 7px 0;
-  }
-  .playground-dashboard .empty-mark::before {
-    font-size: 16px;
-  }
 }
 
 /* Keep the model control grounded in the dark workspace rather than browser chrome. */
@@ -72,7 +56,7 @@
   font-size: 0;
 }
 .playground-dashboard .playground-model-row label .playground-kicker::after {
-  content: "Available open models";
+  content: "CURATED MODEL";
   color: #b7c0ca;
   font: 9px/1.4 var(--font-geist-mono), monospace;
   letter-spacing: .12em;

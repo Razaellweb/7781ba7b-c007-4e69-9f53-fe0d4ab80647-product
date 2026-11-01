@@ -6,19 +6,19 @@ const questions = [
   {
     id: "verify",
     number: "01",
-    label: "Verify ownership",
+    label: "Sign in with Privy",
     eyebrow: "ENTRY",
-    title: "Start with the wallet you already hold.",
-    body: "Privy authenticates your identity, then Openweight checks the configured OPENWEIGHT holding on Robinhood Chain. No new password, provider account, or API key is added to the path.",
-    detail: "Identity and ownership stay explicit from the first step.",
+    title: "Start with a verified identity.",
+    body: "Privy authenticates your identity and that verified session is the access requirement. No new password, provider account, API key, or token-holding check is added to the path.",
+    detail: "Identity stays explicit from the first step.",
   },
   {
     id: "receive",
     number: "02",
     label: "Receive compute",
     eyebrow: "ALLOWANCE",
-    title: "Eligibility becomes a recurring allowance.",
-    body: "Eligible holders receive internal USD compute for approved model access. Grants are recorded for the relevant period and do not silently duplicate or imply unlimited usage.",
+    title: "A verified session becomes a recurring allowance.",
+    body: "Authenticated accounts receive internal USD compute for approved model access. Grants are recorded for the relevant period and do not silently duplicate or imply unlimited usage.",
     detail: "A clear balance replaces a complicated subscription flow.",
   },
   {
@@ -37,7 +37,7 @@ const questions = [
     eyebrow: "WORKSPACE",
     title: "The conversation stays simple.",
     body: "Submit a prompt and receive a streamed response while Openweight tracks usage in the background. Reservations and settlement keep each request accountable as it runs.",
-    detail: "Open-weight intelligence, unlocked by ownership.",
+    detail: "Open-weight intelligence, unlocked by a verified session.",
   },
 ];
 
@@ -57,7 +57,7 @@ export default function HowItWorksInteractive() {
             <span className="landing-how-interactive-label">// HOW IT WORKS / THE SHORT VERSION</span>
             <h2 id="landing-how-interactive-heading">ACCESS, WITHOUT THE FRICTION.</h2>
           </div>
-          <p>One clear sequence turns ownership into a simple, accountable way to use curated open-weight intelligence.</p>
+          <p>One clear sequence turns a verified identity into a simple, accountable way to use curated open-weight intelligence.</p>
         </div>
 
         <div className="landing-how-interactive-layout">
@@ -78,7 +78,7 @@ export default function HowItWorksInteractive() {
                   >
                     <span className="landing-how-question-number">{question.number}</span>
                     <span className="landing-how-question-label">{question.label}</span>
-                    <span className="landing-how-question-arrow" aria-hidden="true">↗</span>
+                    <span className="landing-how-question-arrow" aria-hidden="true">\u2197</span>
                   </button>
                 );
               })}
@@ -92,7 +92,7 @@ export default function HowItWorksInteractive() {
               <span>{activeQuestion.number} / {questions.length.toString().padStart(2, "0")}</span>
             </div>
             <div className="landing-how-answer">
-              <span className="landing-how-answer-mark" aria-hidden="true">✦</span>
+              <span className="landing-how-answer-mark" aria-hidden="true">\u2726</span>
               <h3 id="landing-how-answer-title">{activeQuestion.title}</h3>
               <p>{activeQuestion.body}</p>
             </div>

@@ -5,16 +5,34 @@ export type MicroUsd = bigint;
 export type AccountingChannel = "app" | "api_key";
 export class AccountingError extends Error { readonly code: string; constructor(message: string, code = "ACCOUNTING_ERROR") { super(message); this.code = code; } }
 
+// Canonical monthly period boundaries in UTC. Grants are idempotent per period
+// via recurrence_key, so this can be called from any request path safely.
+export function currentAllowancePeriod(): { start: Date; end: Date } {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return { start, end };
+}
+
 export async function issueGrant(accountId: string, periodStart: Date, periodEnd: Date) {
   const c = allowanceConfig();
   return transaction(async db => {
-    const eligible = await db.query(`SELECT 1 FROM holder_eligibility WHERE account_id=$1 AND state='eligible' AND verified_at > now() - interval '1 second' * $2 ORDER BY verified_at DESC LIMIT 1`, [accountId, 900]);
-    if (!eligible.rowCount) throw new AccountingError("Fresh holder eligibility is required", "HOLDER_VERIFICATION_REQUIRED");
+    // Grants are issued to any authenticated, Privy-verified account. Ownership
+    // is no longer a precondition, so no holder_eligibility lookup happens here.
     const grant = await db.query(`INSERT INTO compute_grants (account_id, amount_micro_usd, period_start, period_end, recurrence_key) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (account_id, recurrence_key) DO NOTHING RETURNING *`, [accountId, c.amountMicroUsd.toString(), periodStart, periodEnd, `${c.recurrence}:${periodStart.toISOString()}`]);
     if (!grant.rowCount) return (await db.query(`SELECT * FROM compute_grants WHERE account_id=$1 AND recurrence_key=$2`, [accountId, `${c.recurrence}:${periodStart.toISOString()}`])).rows[0];
     await db.query(`INSERT INTO compute_ledger_entries (account_id, grant_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'grant',$3,$4,$5)`, [accountId, grant.rows[0].id, c.amountMicroUsd.toString(), `grant:${grant.rows[0].id}`, JSON.stringify({ periodStart, periodEnd })]);
     return grant.rows[0];
   });
+}
+
+// Ensures the authenticated account holds the configured default allowance for
+// the current period. The allowance is a separately handled mechanism: it never
+// consults chain state, token balances, or legacy holder-status rows, and it
+// never invents a new amount (it reuses allowanceConfig()).
+export async function ensureDefaultAllowance(accountId: string) {
+  const { start, end } = currentAllowancePeriod();
+  return issueGrant(accountId, start, end);
 }
 
 export async function reserveCompute(accountId: string, operationKey: string, estimate: MicroUsd, options: { apiKeyId?: string; channel?: AccountingChannel } = {}) {
@@ -25,7 +43,7 @@ export async function reserveCompute(accountId: string, operationKey: string, es
     if (existing.rowCount) return existing.rows[0];
     await db.query(`SELECT id FROM user_accounts WHERE id=$1 FOR UPDATE`, [accountId]);
     const grantState = await db.query<{ active_count: string; expired_count: string }>(`SELECT count(*) FILTER (WHERE period_end > now())::text active_count, count(*) FILTER (WHERE period_end <= now())::text expired_count FROM compute_grants WHERE account_id=$1`, [accountId]);
-    if (grantState.rows[0].active_count === "0") throw new AccountingError(grantState.rows[0].expired_count === "0" ? "No active compute allowance is available" : "Your compute allowance has expired; refresh eligibility to renew it", grantState.rows[0].expired_count === "0" ? "ALLOWANCE_MISSING" : "ALLOWANCE_EXPIRED");
+    if (grantState.rows[0].active_count === "0") throw new AccountingError(grantState.rows[0].expired_count === "0" ? "No active compute allowance is available" : "Your compute allowance has expired; refresh allowance to renew it", grantState.rows[0].expired_count === "0" ? "ALLOWANCE_MISSING" : "ALLOWANCE_EXPIRED");
     const balance = await db.query<{ available: string }>(`SELECT COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`, [accountId]);
     if (BigInt(balance.rows[0].available) < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
     const reservation = await db.query(`INSERT INTO compute_reservations (account_id, operation_key, reserved_micro_usd, status, api_key_id, channel) VALUES ($1,$2,$3,'reserved',$4,$5) RETURNING *`, [accountId, operationKey, estimate.toString(), options.apiKeyId ?? null, channel]);

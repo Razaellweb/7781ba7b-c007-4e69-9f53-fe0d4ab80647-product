@@ -78,6 +78,9 @@ function BenchmarkPair({ comparison, pairId, selected, onSelect }: { comparison:
 export default function Page() {
   const [selectedPair, setSelectedPair] = useState<string | null>(null);
 
+  // ENTER and Get Compute both enter the single Privy entry flow. That screen
+  // forwards an already authenticated visitor straight to the workspace, so a
+  // returning user never sees an intermediate verification step.
   return (
     <main className="landing">
       <style>{`

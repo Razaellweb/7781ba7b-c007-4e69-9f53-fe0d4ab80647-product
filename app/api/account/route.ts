@@ -1,15 +1,24 @@
 import { NextResponse } from "next/server";
 import { authenticatePrivyRequest, AuthenticationError } from "../../../lib/server/auth";
+import { provisionDefaultAllowance, resolveIdentityAccess } from "../../../lib/server/holder";
 import { query } from "../../../lib/server/db";
 import { ensureMigrated } from "../../../lib/server/migrate";
 
-// Account state (PRD §28.1): identity, holder status with balance/threshold,
-// and available compute. Never exposes provider credentials.
+// Account state (PRD §28.1): identity, authorization status, and available
+// compute. Never exposes provider credentials.
+//
+// Authorization is identity-based: a verified Privy identity is sufficient. The
+// legacy holder_eligibility record is still read for reporting compatibility, but
+// it never determines access. Historical ownership-verified rows remain in the
+// table untouched and readable, and a missing or legacy non-eligible state can
+// never disable models, chat, or inference.
 export async function GET(request: Request) {
   try {
     await ensureMigrated();
     const account = await authenticatePrivyRequest(request.headers.get("authorization"));
-    const eligibility = await query<{ state: string; chain_id: number | null; wallet_address: string; balance_raw: string | null; threshold_raw: string | null; token_decimals: number | null; verified_at: string }>(
+    await provisionDefaultAllowance(account);
+    const access = await resolveIdentityAccess(account);
+    const history = await query<{ state: string; chain_id: number | null; wallet_address: string | null; balance_raw: string | null; threshold_raw: string | null; token_decimals: number | null; verified_at: string }>(
       `SELECT state, chain_id, wallet_address, balance_raw, threshold_raw, token_decimals, verified_at FROM holder_eligibility WHERE account_id=$1 ORDER BY verified_at DESC LIMIT 1`,
       [account.accountId]
     );
@@ -19,10 +28,29 @@ export async function GET(request: Request) {
          FROM compute_ledger_entries WHERE account_id=$1`,
       [account.accountId]
     );
-    const holder = eligibility[0]
-      ? { state: eligibility[0].state, eligible: eligibility[0].state === "eligible", walletAddress: eligibility[0].wallet_address, chainId: eligibility[0].chain_id, balanceRaw: eligibility[0].balance_raw, thresholdRaw: eligibility[0].threshold_raw, tokenDecimals: eligibility[0].token_decimals, verifiedAt: eligibility[0].verified_at }
+    const holder = {
+      state: access.state,
+      eligible: true,
+      authorized: true,
+      method: access.method,
+      walletAddress: access.wallet_address,
+      chainId: null,
+      balanceRaw: null,
+      thresholdRaw: null,
+      tokenDecimals: null,
+      verifiedAt: access.verified_at,
+    };
+    const legacyHolder = history[0]
+      ? { state: history[0].state, eligible: history[0].state === "eligible", walletAddress: history[0].wallet_address, chainId: history[0].chain_id, balanceRaw: history[0].balance_raw, thresholdRaw: history[0].threshold_raw, tokenDecimals: history[0].token_decimals, verifiedAt: history[0].verified_at }
       : null;
-    return NextResponse.json({ account, holder, eligibility: eligibility[0] ?? null, compute: balance[0] ?? { available: "0", reserved: "0" } });
+    return NextResponse.json({
+      account,
+      access: { authorized: true, method: access.method },
+      holder,
+      eligibility: holder,
+      legacyHolder,
+      compute: balance[0] ?? { available: "0", reserved: "0" },
+    });
   } catch (error) {
     if (error instanceof AuthenticationError) return NextResponse.json({ error: error.message, code: error.code }, { status: 401 });
     return NextResponse.json({ error: "Unable to load account state", code: "ACCOUNT_UNAVAILABLE" }, { status: 503 });
