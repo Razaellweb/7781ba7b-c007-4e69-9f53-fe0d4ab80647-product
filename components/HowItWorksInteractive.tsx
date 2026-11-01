@@ -61,7 +61,8 @@ export default function HowItWorksInteractive() {
         </div>
 
         <div className="landing-how-interactive-layout">
-          <nav className="landing-how-questions" aria-label="How it works questions">
+          {/* A landing-page step selector, not application navigation. */}
+          <div className="landing-how-questions" role="group" aria-label="How it works questions">
             <span className="landing-how-questions-label">THE SEQUENCE</span>
             <div className="landing-how-question-list">
               {questions.map((question) => {
@@ -78,13 +79,13 @@ export default function HowItWorksInteractive() {
                   >
                     <span className="landing-how-question-number">{question.number}</span>
                     <span className="landing-how-question-label">{question.label}</span>
-                    <span className="landing-how-question-arrow" aria-hidden="true">\u2197</span>
+                    <span className="landing-how-question-arrow" aria-hidden="true">{"\u2197"}</span>
                   </button>
                 );
               })}
             </div>
             <p className="landing-how-question-hint">Select a question to move through the system.</p>
-          </nav>
+          </div>
 
           <div className="landing-how-viewport" id="landing-how-answer" role="region" aria-live="polite" aria-labelledby="landing-how-answer-title">
             <div className="landing-how-viewport-top">
@@ -92,7 +93,7 @@ export default function HowItWorksInteractive() {
               <span>{activeQuestion.number} / {questions.length.toString().padStart(2, "0")}</span>
             </div>
             <div className="landing-how-answer">
-              <span className="landing-how-answer-mark" aria-hidden="true">\u2726</span>
+              <span className="landing-how-answer-mark" aria-hidden="true">{"\u2726"}</span>
               <h3 id="landing-how-answer-title">{activeQuestion.title}</h3>
               <p>{activeQuestion.body}</p>
             </div>
