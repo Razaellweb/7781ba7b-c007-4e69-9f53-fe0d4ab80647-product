@@ -16,3 +16,10 @@ export function pricingConfig() { const raw = optional("DEFAULT_MARKUP_MULTIPLIE
 export function userRateLimit() { return integer("INFERENCE_USER_RATE_LIMIT_PER_MINUTE", 20); }
 export function privyConfig() { return { appId: required("PRIVY_APP_ID"), appSecret: required("PRIVY_APP_SECRET") }; }
 export function openRouterConfig() { const enabled = (optional("OPENROUTER_ENABLED") ?? "false") === "true"; if (!enabled) return { enabled: false as const }; return { enabled: true as const, apiKey: required("OPENROUTER_API_KEY"), baseUrl: optional("OPENROUTER_BASE_URL") ?? "https://openrouter.ai/api/v1" }; }
+// Vast.ai GPU marketplace credentials. This is a SERVER-ONLY boundary: the key is
+// read from the process environment, is only ever attached to outbound requests by
+// lib/server/vast.ts, and is never returned to a client, embedded in a response
+// body, or written to a log. Like openRouterConfig(), a disabled/missing key is a
+// normal configuration state rather than a hard crash, so the offers endpoint can
+// degrade to a sanitized "temporarily unavailable" response.
+export function vastConfig() { const apiKey = optional("VAST_API_KEY"); if (!apiKey) return { enabled: false as const, apiKey: undefined, baseUrl: undefined }; return { enabled: true as const, apiKey, baseUrl: (optional("VAST_API_BASE_URL") ?? "https://console.vast.ai/api/v0").replace(/\/+$/, "") }; }

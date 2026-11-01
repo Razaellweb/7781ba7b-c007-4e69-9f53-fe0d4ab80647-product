@@ -5,7 +5,7 @@ import Link from "next/link";
 
 const brandIcon = "/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png";
 
-export type WorkspaceSection = "overview" | "playground" | "api-keys";
+export type WorkspaceSection = "overview" | "playground" | "gpu" | "api-keys";
 
 type NavItem = { section: WorkspaceSection; label: string; href: string; glyph: string };
 
@@ -14,6 +14,9 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
   { section: "overview", label: "Overview", href: "/dashboard", glyph: "\u25c9" },
   { section: "playground", label: "Playground", href: "/playground", glyph: "\u25cc" },
   { section: "api-keys", label: "API Keys", href: "/settings", glyph: "\u25c7" },
+  // GPU offers live on their own authenticated workspace route; the chip glyph
+  // matches the geometric mark used by the other workspace sections.
+  { section: "gpu", label: "GPU", href: "/gpu", glyph: "\u25a3" },
 ];
 
 type WorkspaceShellProps = {

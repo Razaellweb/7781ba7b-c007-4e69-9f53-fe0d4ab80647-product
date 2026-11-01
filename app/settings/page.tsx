@@ -165,10 +165,11 @@ export default function SettingsPage() {
       <aside className="compute-sidebar">
         <Link className="compute-brand key-brand" href="/"><span className="mark"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><span>OPENWEIGHT</span></Link>
         <div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div>
-        <nav>
+        <nav aria-label="Workspace navigation">
           <Link href="/dashboard">Overview</Link>
           <Link href="/playground">Playground</Link>
-          <Link className="active" href="/settings">API Keys</Link>
+          <Link className="active" href="/settings" aria-current="page">API Keys</Link>
+          <Link href="/gpu">GPU</Link>
         </nav>
         <div className="compute-sidebar-foot"><div>ACCOUNT / API ACCESS</div><small>First-party credentials</small></div>
       </aside>
