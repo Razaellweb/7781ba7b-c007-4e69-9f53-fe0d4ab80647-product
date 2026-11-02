@@ -1,20 +1,18 @@
-import { VAST_API_KEY_VARIABLES, vastApiBaseUrl, vastApiKeySource, vastConfig } from "./config";
+import { vastConfig } from "./config";
 
 // Vast.ai GPU marketplace integration — the credential boundary.
 //
 // This module is the ONLY place in the application that holds, uses, or even
 // reads the Vast.ai API key. Rules enforced here:
 //
-//   1. The key comes from the server environment (VAST_API_KEY, or any of the
-//      other documented spellings accepted by config.ts) via vastConfig(). It is
-//      never accepted from a request, a client, or a user-provided field.
+//   1. The key comes from the server environment (VAST_API_KEY) via vastConfig().
+//      It is never accepted from a request, a client, or a user-provided field.
 //   2. The key is only ever attached to the outbound request as the documented
 //      `Authorization: Bearer <key>` header. It is never put in the URL/query
 //      string (which would be captured by access logs) and never in a response.
 //   3. Nothing that leaves this module — return values, thrown errors, or log
 //      lines — contains the key, the raw upstream payload, or upstream-provided
-//      error text. Failures collapse into one sanitized VastUnavailableError, and
-//      the read-only diagnostics below report only presence + host + reason.
+//      error text. Failures collapse into one sanitized VastUnavailableError.
 //
 // Wire format (docs.vast.ai → "Search offers"):
 //   GET https://console.vast.ai/api/v0/bundles/?q=<url-encoded JSON>
@@ -24,53 +22,15 @@ import { VAST_API_KEY_VARIABLES, vastApiBaseUrl, vastApiKeySource, vastConfig } 
 // normalized below. Offer search is read-only; renting is the separate
 // instance section at the end of this module.
 //
-// Three wire details that are easy to get wrong (all checked against the live API):
+// Two wire details that are easy to get wrong (both checked against the live API):
 //   - `gpu_name` matches the display name exactly, with spaces ("RTX 4090").
 //     The underscore form ("RTX_4090") matches nothing. Exact names come from
 //     GET /api/v0/gpu_names/unique/ → { "gpu_names": [ … ] }.
 //   - Upstream returns at most 64 offers per query, cheapest first. A model,
 //     VRAM or text constraint applied only to the returned page would hide every
 //     machine above the cheapest 64, so those constraints are sent upstream.
-//   - The API answers on both console.vast.ai and cloud.vast.ai. A deployment
-//     whose egress cannot resolve one of them must not look like "no offers", so
-//     both documented hosts are tried and whichever answers is remembered.
 
 export const GPU_OFFERS_UNAVAILABLE_MESSAGE = "GPU offers are temporarily unavailable";
-
-/** The two documented API hosts. The first is the documented default. */
-const DOCUMENTED_BASE_URLS = ["https://console.vast.ai/api/v0", "https://cloud.vast.ai/api/v0"] as const;
-
-/**
- * The base URL that last answered successfully, per server process.
- *
- * Marketplace reads and lifecycle writes must both target the host that actually
- * answered, so the first success pins the host for subsequent calls instead of
- * paying the failed probe again on every request.
- */
-let preferredBaseUrl: string | null = null;
-
-/** Test/ops helper: forget the pinned host so the next call re-probes. */
-export function resetVastEndpointPreference(): void {
-  preferredBaseUrl = null;
-}
-
-/** The host to use next: the one that worked, else the configured default. */
-export function marketplaceBaseUrl(): string {
-  return preferredBaseUrl ?? vastApiBaseUrl();
-}
-
-/**
- * Every base URL worth trying, configured host first.
- *
- * A custom VAST_API_BASE_URL is honoured first and is never duplicated. The
- * documented hosts follow so a DNS/egress problem with one of them does not
- * present as an empty marketplace.
- */
-export function candidateBaseUrls(): string[] {
-  const configured = marketplaceBaseUrl();
-  const list = [configured, ...DOCUMENTED_BASE_URLS];
-  return Array.from(new Set(list.map((value) => value.replace(/\/+$/, ""))));
-}
 
 /**
  * Machine-readable failure reason. Lets the API route and the /gpu page show
@@ -404,19 +364,30 @@ function upstreamModelNames(filters: GpuOfferFilters, catalog: string[]): string
 }
 
 /**
- * One read-only offer page from ONE host. Returns the normalized body or throws a
- * sanitized failure, so the caller can decide whether another host is worth
- * trying.
+ * Searches rentable, verified GPU offers on Vast.ai.
+ *
+ * Read-only and server-only. The API key never leaves this function's request
+ * headers. Any credential problem (missing key, revoked key, rejected key) and
+ * any upstream failure surface as the same sanitized VastUnavailableError, so a
+ * caller cannot distinguish -- and therefore cannot leak -- upstream detail. The
+ * failure `kind` only classifies the reason for user-facing copy.
  */
-async function fetchOffersFrom(
-  host: string,
-  apiKey: string,
-  query: Record<string, unknown>,
-): Promise<{ status: number; body: Record<string, unknown>; latencyMs: number }> {
-  const endpoint = `${host}/bundles/?q=${encodeURIComponent(JSON.stringify(query))}`;
+export async function searchGpuOffers(filters: GpuOfferFilters = {}): Promise<GpuOfferSearchResult> {
+  const config = vastConfig();
+  if (!config.enabled || !config.apiKey || !config.baseUrl) {
+    // Missing configuration is a normal degraded state, not a crash. Log the
+    // event name only -- never the value or any part of it.
+    console.error(JSON.stringify({ event: "gpu_offers_credentials_missing" }));
+    // Retrying cannot help until the server credential is configured.
+    throw new VastUnavailableError(false, "unconfigured");
+  }
+
+  const catalogModels = await gpuModelCatalog({ apiKey: config.apiKey, baseUrl: config.baseUrl });
+  const query = buildQuery(filters, upstreamModelNames(filters, catalogModels));
+  const endpoint = `${config.baseUrl}/bundles/?q=${encodeURIComponent(JSON.stringify(query))}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  const startedAt = Date.now();
+
   let response: Response;
   let payload: unknown;
   try {
@@ -426,7 +397,7 @@ async function fetchOffersFrom(
         headers: {
           // Documented Vast.ai REST authentication: Bearer API key. Header only --
           // never the `?api_key=` query-parameter alternative.
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${config.apiKey}`,
           Accept: "application/json",
         },
         cache: "no-store",
@@ -437,7 +408,7 @@ async function fetchOffersFrom(
       // a transport problem. Both are retryable and identical to the caller.
       const timedOut = controller.signal.aborted
         || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
-      console.error(JSON.stringify({ event: timedOut ? "gpu_offers_timeout" : "gpu_offers_transport_failed", host }));
+      console.error(JSON.stringify({ event: timedOut ? "gpu_offers_timeout" : "gpu_offers_transport_failed" }));
       throw new VastUnavailableError(true, timedOut ? "timeout" : "transport");
     }
 
@@ -445,7 +416,7 @@ async function fetchOffersFrom(
       payload = await response.json();
     } catch {
       // Non-JSON body: an HTML error page, a truncated response, a proxy banner.
-      console.error(JSON.stringify({ event: "gpu_offers_malformed_response", stage: "parse", host }));
+      console.error(JSON.stringify({ event: "gpu_offers_malformed_response", stage: "parse" }));
       throw new VastUnavailableError(true, "malformed");
     }
   } finally {
@@ -453,11 +424,10 @@ async function fetchOffersFrom(
   }
 
   const body = objectValue(payload) ?? {};
-  const latencyMs = Date.now() - startedAt;
 
   if (isRateLimited(response.status, body)) {
     const wait = retryAfterSeconds(response) ?? DEFAULT_RATE_LIMIT_RETRY_SECONDS;
-    console.error(JSON.stringify({ event: "gpu_offers_upstream_failed", reason: "rate_limited", status: response.status, retryAfterSeconds: wait, host }));
+    console.error(JSON.stringify({ event: "gpu_offers_upstream_failed", reason: "rate_limited", status: response.status, retryAfterSeconds: wait }));
     throw new VastUnavailableError(true, "rate_limited", wait);
   }
 
@@ -466,70 +436,27 @@ async function fetchOffersFrom(
     // missing/rejected; everything else is an upstream problem. Both are
     // reported identically downstream -- only the reason tag differs.
     const rejected = isCredentialRejection(response.status, body);
-    console.error(JSON.stringify({ event: "gpu_offers_upstream_failed", reason: rejected ? "credentials_rejected" : "upstream_error", status: response.status, host }));
+    console.error(JSON.stringify({ event: "gpu_offers_upstream_failed", reason: rejected ? "credentials_rejected" : "upstream_error", status: response.status }));
     // A rejected credential is not retryable until configuration changes;
     // a transient upstream error is.
     throw new VastUnavailableError(!rejected, rejected ? "credentials_rejected" : "upstream");
   }
 
-  if (!Array.isArray(body.offers)) {
+  const rawOffers = Array.isArray(body.offers) ? body.offers : null;
+  if (!rawOffers) {
     // The request succeeded but the payload does not match the documented shape
     // (`{ offers: [...] }`), so nothing on this page can be trusted.
-    console.error(JSON.stringify({ event: "gpu_offers_malformed_response", host }));
+    console.error(JSON.stringify({ event: "gpu_offers_malformed_response" }));
     throw new VastUnavailableError(true, "malformed");
   }
 
-  return { status: response.status, body, latencyMs };
-}
+  const catalog = rawOffers.map(normalizeOffer).filter((offer): offer is GpuOffer => offer !== null);
+  // The model filter lists every model the marketplace knows, not only the ones
+  // in this page of cheapest offers, so high-end GPUs can be selected at all.
+  const gpuModels = Array.from(new Set([...catalogModels, ...catalog.map((offer) => offer.gpuName)])).sort((a, b) => a.localeCompare(b));
+  const offers = applyFilters(catalog, filters);
 
-/**
- * Searches rentable, verified GPU offers on Vast.ai.
- *
- * Read-only and server-only. The API key never leaves this function's request
- * headers. Any credential problem (missing key, revoked key, rejected key) and
- * any upstream failure surface as the same sanitized VastUnavailableError, so a
- * caller cannot distinguish -- and therefore cannot leak -- upstream detail. The
- * failure `kind` only classifies the reason for user-facing copy.
- *
- * Endpoint resilience: a transport/DNS failure or a non-JSON answer is retried on
- * the other documented host, and the host that answered is remembered so later
- * marketplace and lifecycle calls go straight there. Credential and throttling
- * failures are NOT retried elsewhere -- they are not host-specific.
- */
-export async function searchGpuOffers(filters: GpuOfferFilters = {}): Promise<GpuOfferSearchResult> {
-  const config = vastConfig();
-  if (!config.enabled || !config.apiKey) {
-    // Missing configuration is a normal degraded state, not a crash. Log the
-    // event name only -- never the value or any part of it.
-    console.error(JSON.stringify({ event: "gpu_offers_credentials_missing" }));
-    // Retrying cannot help until the server credential is configured.
-    throw new VastUnavailableError(false, "unconfigured");
-  }
-
-  const catalogModels = await gpuModelCatalog({ apiKey: config.apiKey, baseUrl: marketplaceBaseUrl() });
-  const query = buildQuery(filters, upstreamModelNames(filters, catalogModels));
-
-  let lastFailure: VastUnavailableError | null = null;
-  for (const host of candidateBaseUrls()) {
-    try {
-      const { body } = await fetchOffersFrom(host, config.apiKey, query);
-      preferredBaseUrl = host;
-      const rawOffers = body.offers as unknown[];
-      const catalog = rawOffers.map(normalizeOffer).filter((offer): offer is GpuOffer => offer !== null);
-      // The model filter lists every model the marketplace knows, not only the ones
-      // in this page of cheapest offers, so high-end GPUs can be selected at all.
-      const gpuModels = Array.from(new Set([...catalogModels, ...catalog.map((offer) => offer.gpuName)])).sort((a, b) => a.localeCompare(b));
-      const offers = applyFilters(catalog, filters);
-      return { offers, total: catalog.length, gpuModels };
-    } catch (error) {
-      const failure = error instanceof VastUnavailableError ? error : new VastUnavailableError(true, "upstream");
-      lastFailure = failure;
-      // Only an endpoint-specific failure is worth trying on another host.
-      if (failure.kind !== "transport" && failure.kind !== "timeout" && failure.kind !== "malformed") throw failure;
-      console.error(JSON.stringify({ event: "gpu_offers_host_unavailable", host, kind: failure.kind }));
-    }
-  }
-  throw lastFailure ?? new VastUnavailableError(true, "upstream");
+  return { offers, total: catalog.length, gpuModels };
 }
 
 /** Convenience wrapper returning only the filtered offer list. */
@@ -575,11 +502,11 @@ export type InstanceSpec = {
 
 function requireVast(): { apiKey: string; baseUrl: string } {
   const config = vastConfig();
-  if (!config.enabled || !config.apiKey) {
+  if (!config.enabled || !config.apiKey || !config.baseUrl) {
     console.error(JSON.stringify({ event: "gpu_rental_credentials_missing" }));
     throw new VastUnavailableError(false, "unconfigured");
   }
-  return { apiKey: config.apiKey, baseUrl: marketplaceBaseUrl() };
+  return { apiKey: config.apiKey, baseUrl: config.baseUrl };
 }
 
 // One authenticated JSON request. Returns the HTTP status and parsed object
@@ -747,183 +674,4 @@ export async function findInstanceByLabel(label: string): Promise<VastInstance |
   }
   const match = body.instances.map(normalizeInstance).find((instance) => instance?.label === label);
   return match ?? null;
-}
-
-// ---------------------------------------------------------------------------
-// Diagnostics (READ-ONLY).
-// ---------------------------------------------------------------------------
-// "The key is set but nothing shows" has a small number of causes, and the
-// product must be able to say which one instead of rendering a generic
-// unavailable panel. These helpers report PRESENCE and NETWORK OUTCOME only: the
-// variable name that supplied the key, the hosts that were tried, each host's
-// outcome and latency, and how many offers came back. They never return the key,
-// a fragment of it, an upstream error message, or a response body.
-
-/** Non-secret configuration facts, safe to render on the GPU page. */
-export type VastMarketplaceConfigReport = {
-  /** True when a key is present (any accepted variable) and not the placeholder. */
-  configured: boolean;
-  /** The environment variable that supplied the key, or null. Never the value. */
-  keyVariable: string | null;
-  /** Environment variables checked, so the page can say what to add. */
-  acceptedKeyVariables: string[];
-  /** Hosts that may be tried, in order. */
-  hosts: string[];
-  /** The host the last successful call used, or null before the first success. */
-  activeHost: string | null;
-};
-
-export function describeVastMarketplaceConfig(): VastMarketplaceConfigReport {
-  const { value, variable } = vastApiKeySource();
-  return {
-    configured: Boolean(value),
-    keyVariable: variable,
-    acceptedKeyVariables: [...VAST_API_KEY_VARIABLES],
-    hosts: candidateBaseUrls(),
-    activeHost: preferredBaseUrl,
-  };
-}
-
-/** One host's attempt, as reported to the operator. No upstream text. */
-export type VastMarketplaceAttempt = {
-  host: string;
-  /** ok | auth | rate_limited | timeout | transport | http_error | malformed | skipped */
-  outcome: "ok" | "auth" | "rate_limited" | "timeout" | "transport" | "http_error" | "malformed" | "skipped";
-  /** HTTP status when a response arrived. */
-  status: number | null;
-  latencyMs: number | null;
-  /** Offers returned by this host's probe. */
-  offerCount: number | null;
-  /** Total offers the probe page contained, before any filter. */
-  total: number | null;
-  /** Stable reason tag for the UI copy. */
-  reason: string | null;
-};
-
-export type VastMarketplaceDiagnosis = {
-  config: VastMarketplaceConfigReport;
-  attempts: VastMarketplaceAttempt[];
-  /** Host that answered with offers, if any. */
-  healthyHost: string | null;
-  /** Offers visible through the probe query (rentable + verified). */
-  offersVisible: number;
-  /** GPU models visible through the probe. */
-  modelsVisible: number;
-  latencyMs: number | null;
-  /** True when at least one host answered successfully. */
-  reachable: boolean;
-  /** Operator-facing summary of what to fix, or null when nothing is wrong. */
-  hint: string | null;
-};
-
-/**
- * Probes the marketplace with ONE minimal, read-only offers query per candidate
- * host and reports exactly what happened.
- *
- * Read-only: it calls GET /bundles/ with a small limit. It never rents, stops or
- * mutates anything, and it is safe to call from a page render.
- */
-export async function diagnoseVastMarketplace(): Promise<VastMarketplaceDiagnosis> {
-  const config = describeVastMarketplaceConfig();
-
-  if (!config.configured) {
-    return {
-      config,
-      attempts: config.hosts.map((host) => ({ host, outcome: "skipped" as const, status: null, latencyMs: null, offerCount: null, total: null, reason: "No API key is configured on the server." })),
-      healthyHost: null,
-      offersVisible: 0,
-      modelsVisible: 0,
-      latencyMs: null,
-      reachable: false,
-      hint: `Add the vast.ai account API key (console.vast.ai → Account → API Keys) as ${config.acceptedKeyVariables[0]}, then redeploy. Accepted variables: ${config.acceptedKeyVariables.join(", ")}.`,
-    };
-  }
-
-  const { value: apiKey } = vastApiKeySource();
-  const attempts: VastMarketplaceAttempt[] = [];
-  let healthyHost: string | null = null;
-  let offersVisible = 0;
-  let modelsVisible = 0;
-  let latencyMs: number | null = null;
-
-  const probeQuery = { verified: { eq: true }, rentable: { eq: true }, order: [["dph_total", "asc"]], limit: 8 };
-
-  for (const host of config.hosts) {
-    if (!apiKey) break;
-    const attemptStarted = Date.now();
-    try {
-      const { status, body } = await fetchOffersFrom(host, apiKey, probeQuery);
-      const rawOffers = Array.isArray(body.offers) ? body.offers : [];
-      const offers = rawOffers.map(normalizeOffer).filter((offer): offer is GpuOffer => offer !== null);
-      const models = new Set(offers.map((offer) => offer.gpuName));
-      attempts.push({ host, outcome: "ok", status, latencyMs: Date.now() - attemptStarted, offerCount: offers.length, total: offers.length, reason: null });
-      healthyHost = host;
-      preferredBaseUrl = host;
-      offersVisible = offers.length;
-      modelsVisible = models.size;
-      latencyMs = Date.now() - attemptStarted;
-      break;
-    } catch (error) {
-      const failure = error instanceof VastUnavailableError ? error : new VastUnavailableError(true, "upstream");
-      const outcome: VastMarketplaceAttempt["outcome"] =
-        failure.kind === "credentials_rejected" ? "auth"
-          : failure.kind === "rate_limited" ? "rate_limited"
-            : failure.kind === "timeout" ? "timeout"
-              : failure.kind === "transport" ? "transport"
-                : failure.kind === "malformed" ? "malformed"
-                  : "http_error";
-      attempts.push({
-        host,
-        outcome,
-        status: null,
-        latencyMs: Date.now() - attemptStarted,
-        offerCount: null,
-        total: null,
-        reason: outcome === "auth" ? "The API key was rejected (invalid or revoked)."
-          : outcome === "rate_limited" ? "The marketplace asked us to slow down."
-            : outcome === "timeout" ? "The marketplace did not answer in time."
-              : outcome === "transport" ? "This host could not be reached from the server (DNS/egress)."
-                : outcome === "malformed" ? "The host answered with something that was not a marketplace payload."
-                  : "The marketplace returned an error.",
-      });
-      // A credential/throttling failure is not host-specific: stop probing.
-      if (outcome === "auth" || outcome === "rate_limited") break;
-    }
-  }
-
-  if (healthyHost && offersVisible === 0) {
-    return {
-      config: { ...config, activeHost: healthyHost },
-      attempts,
-      healthyHost,
-      offersVisible,
-      modelsVisible,
-      latencyMs,
-      reachable: true,
-      // Reaching the API with a valid key but seeing no offers is a marketplace
-      // state (or an account-level one), not a configuration bug.
-      hint: "The API answered and accepted the key, but no rentable verified offers came back. That is a marketplace/account state rather than a configuration problem — refresh in a moment, and confirm billing is enabled on the vast.ai account.",
-    };
-  }
-
-  const authRejected = attempts.some((attempt) => attempt.outcome === "auth");
-  const unreachable = attempts.length > 0 && attempts.every((attempt) => attempt.outcome === "transport" || attempt.outcome === "timeout");
-  const hint = healthyHost
-    ? null
-    : authRejected
-      ? "The configured vast.ai API key was rejected. Create a new key at console.vast.ai → Account → API Keys, update the environment variable, then redeploy."
-      : unreachable
-        ? "No vast.ai host could be reached from the server. Check the deployment's outbound network access (DNS/egress) for console.vast.ai and cloud.vast.ai."
-        : "The marketplace could not answer. Retry shortly; the credential is present and nothing in the workspace is affected.";
-
-  return {
-    config: { ...config, activeHost: healthyHost },
-    attempts,
-    healthyHost,
-    offersVisible,
-    modelsVisible,
-    latencyMs,
-    reachable: Boolean(healthyHost),
-    hint,
-  };
 }
