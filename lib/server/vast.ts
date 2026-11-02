@@ -21,6 +21,14 @@ import { vastConfig } from "./config";
 // and the response is `{ "offers": [ … ] }` where each offer carries the fields
 // normalized below. This is a read-only "offers" (bundles) lookup: no ask is
 // created and no instance is rented, so the feature stays browse-only.
+//
+// Two wire details that are easy to get wrong (both checked against the live API):
+//   - `gpu_name` matches the display name exactly, with spaces ("RTX 4090").
+//     The underscore form ("RTX_4090") matches nothing. Exact names come from
+//     GET /api/v0/gpu_names/unique/ → { "gpu_names": [ … ] }.
+//   - Upstream returns at most 64 offers per query, cheapest first. A model,
+//     VRAM or text constraint applied only to the returned page would hide every
+//     machine above the cheapest 64, so those constraints are sent upstream.
 
 export const GPU_OFFERS_UNAVAILABLE_MESSAGE = "GPU offers are temporarily unavailable";
 
@@ -77,7 +85,7 @@ export type GpuOffer = {
 export type GpuOfferFilters = {
   /** Free-text match across the offer's text fields (GPU model, location, host kind). */
   query?: string | null;
-  /** Exact GPU model, normalized to Vast.ai's wire form (e.g. RTX_4090). */
+  /** Exact GPU model (e.g. "RTX 4090"); case, spaces and underscores are ignored. */
   gpuName?: string | null;
   minReliability?: number | null;
   minPricePerHour?: number | null;
@@ -93,7 +101,7 @@ export type GpuOfferSearchResult = {
   /** Every rentable/verified offer upstream returned before filtering, so the UI
    *  can tell "the marketplace is empty" apart from "nothing matches". */
   total: number;
-  /** Distinct GPU models present upstream, used to populate the model filter. */
+  /** Every GPU model the marketplace knows (plus any seen in this page), used to populate the model filter. */
   gpuModels: string[];
 };
 
@@ -102,6 +110,15 @@ const MAX_LIMIT = 200;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RETRY_AFTER_SECONDS = 120;
 const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 15;
+const MODEL_CATALOG_TIMEOUT_MS = 5_000;
+const MODEL_CATALOG_TTL_MS = 60 * 60 * 1000;
+const MIN_MODEL_SEARCH_LENGTH = 2;
+// Cards report usable memory, slightly below the marketed size: an H100 80GB
+// reports 81559 MB (79.6 GB), an L4 24GB reports 23034 MB (22.5 GB). A
+// "24 GB and up" filter must keep those, so a minimum VRAM bound accepts
+// anything within 7% of it. The next tier down stays out (a 20GB A4500
+// reports 20470 MB, well under 93% of 24 GB).
+const VRAM_REPORTING_TOLERANCE = 0.93;
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -133,20 +150,29 @@ function boundedNumber(value: number | null | undefined, min: number, max: numbe
   return Math.min(max, Math.max(min, value));
 }
 
-// Builds the documented `q` operator DSL. Only constraints Vast.ai evaluates
-// server-side live here (exact model, price floor/ceiling, reliability, verified /
-// rentable, ordering, limit). Anything the upstream DSL cannot express exactly —
-// VRAM in GB, free-text search — is applied to the normalized offers below so the
-// result never depends on upstream unit conventions.
-function buildQuery(filters: GpuOfferFilters): Record<string, unknown> {
+// Builds the documented `q` operator DSL. Every constraint that narrows the
+// catalog is evaluated upstream: model (exact, or the models a text search
+// names), price, VRAM (Vast.ai counts it in MB), reliability, verified/rentable,
+// ordering and limit. The same filters are also applied to the normalized
+// offers below. That second pass handles what the DSL cannot express, such as
+// a text search on location.
+function buildQuery(filters: GpuOfferFilters, upstreamModels: string[] | null): Record<string, unknown> {
   const query: Record<string, unknown> = {
     verified: { eq: true },
     rentable: { eq: true },
     order: [["dph_total", "asc"]],
     limit: boundedNumber(filters.limit ?? null, 1, MAX_LIMIT) ?? DEFAULT_LIMIT,
   };
-  const gpuName = normalizeGpuName(filters.gpuName);
-  if (gpuName) query.gpu_name = { eq: gpuName };
+  if (upstreamModels && upstreamModels.length === 1) query.gpu_name = { eq: upstreamModels[0] };
+  else if (upstreamModels && upstreamModels.length > 1) query.gpu_name = { in: upstreamModels };
+  const minVram = boundedNumber(filters.minGpuRamGb ?? null, 0, 1_024);
+  const maxVram = boundedNumber(filters.maxGpuRamGb ?? null, 0, 1_024);
+  if (minVram !== null || maxVram !== null) {
+    query.gpu_ram = {
+      ...(minVram !== null ? { gte: Math.floor(minVram * 1024 * VRAM_REPORTING_TOLERANCE) } : {}),
+      ...(maxVram !== null ? { lte: Math.ceil(maxVram * 1024) } : {}),
+    };
+  }
   const reliability = boundedNumber(filters.minReliability ?? null, 0, 1);
   if (reliability !== null) query.reliability2 = { gte: reliability };
   const maxPrice = boundedNumber(filters.maxPricePerHour ?? null, 0, 1_000);
@@ -238,7 +264,9 @@ function matchesQuery(offer: GpuOffer, query: string): boolean {
     offer.verified ? "verified" : "unverified",
     offer.id === null ? "" : String(offer.id),
   ].join(" ").toLowerCase();
-  return haystack.includes(needle);
+  // Model text also matches regardless of spaces vs. underscores ("rtx_4090"),
+  // the same way the upstream model lookup does.
+  return haystack.includes(needle) || modelKey(haystack).includes(modelKey(needle));
 }
 
 function withinRange(value: number | null, min: number | null, max: number | null): boolean {
@@ -262,10 +290,72 @@ function applyFilters(offers: GpuOffer[], filters: GpuOfferFilters): GpuOffer[] 
     if (gpuName && modelKey(offer.gpuName) !== gpuName) return false;
     if (query && !matchesQuery(offer, query)) return false;
     if (!withinRange(offer.hourlyPriceUsd, minPrice, maxPrice)) return false;
-    if (!withinRange(offer.gpuRamGb, minVram, maxVram)) return false;
+    if (!withinRange(offer.gpuRamGb, minVram === null ? null : minVram * VRAM_REPORTING_TOLERANCE, maxVram)) return false;
     if (minReliability !== null && (offer.reliability === null || offer.reliability < minReliability)) return false;
     return true;
   });
+}
+
+let modelCatalogCache: { names: string[]; expiresAt: number } | null = null;
+
+/** Clears the cached model catalog. Exposed for tests only. */
+export function resetGpuModelCatalogCache(): void {
+  modelCatalogCache = null;
+}
+
+// Every GPU model name the marketplace knows, in the exact form `gpu_name`
+// matches. Cached for an hour because the list changes rarely. A failure is not
+// fatal: it returns [] (and caches nothing), and callers fall back to the
+// underscore-free display form of the requested model.
+async function gpuModelCatalog(config: { apiKey: string; baseUrl: string }): Promise<string[]> {
+  if (modelCatalogCache && modelCatalogCache.expiresAt > Date.now()) return modelCatalogCache.names;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${config.baseUrl}/gpu_names/unique/`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${config.apiKey}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const body = objectValue(await response.json());
+    const raw = response.ok && body && Array.isArray(body.gpu_names) ? body.gpu_names : null;
+    const names = raw
+      ? Array.from(new Set(raw.map(safeString).filter((name): name is string => name !== null))).sort((a, b) => a.localeCompare(b))
+      : [];
+    if (names.length === 0) {
+      console.error(JSON.stringify({ event: "gpu_model_catalog_unavailable", status: response.status }));
+      return [];
+    }
+    modelCatalogCache = { names, expiresAt: Date.now() + MODEL_CATALOG_TTL_MS };
+    return names;
+  } catch {
+    console.error(JSON.stringify({ event: "gpu_model_catalog_unavailable" }));
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Works out which exact upstream `gpu_name` values a request is limited to.
+// Returns null when the request is not limited by model.
+//   - An explicit model maps to its exact catalog spelling ("rtx_4090" →
+//     "RTX 4090"). Models missing from the catalog fall back to spaces for
+//     underscores, which is the form the marketplace uses.
+//   - Otherwise a text search that names models ("h100", "4090") is limited to
+//     the catalog models containing it, so expensive machines outside the
+//     cheapest page are still found. Text that names no model (a location)
+//     only narrows the returned page.
+function upstreamModelNames(filters: GpuOfferFilters, catalog: string[]): string[] | null {
+  const requested = normalizeGpuName(filters.gpuName);
+  if (requested) {
+    const exact = catalog.find((name) => modelKey(name) === requested);
+    return [exact ?? requested.replace(/_/g, " ")];
+  }
+  const needle = filters.query ? modelKey(filters.query) : "";
+  if (needle.length < MIN_MODEL_SEARCH_LENGTH) return null;
+  const named = catalog.filter((name) => modelKey(name).includes(needle));
+  return named.length > 0 ? named : null;
 }
 
 /**
@@ -287,7 +377,8 @@ export async function searchGpuOffers(filters: GpuOfferFilters = {}): Promise<Gp
     throw new VastUnavailableError(false, "unconfigured");
   }
 
-  const query = buildQuery(filters);
+  const catalogModels = await gpuModelCatalog({ apiKey: config.apiKey, baseUrl: config.baseUrl });
+  const query = buildQuery(filters, upstreamModelNames(filters, catalogModels));
   const endpoint = `${config.baseUrl}/bundles/?q=${encodeURIComponent(JSON.stringify(query))}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -355,7 +446,9 @@ export async function searchGpuOffers(filters: GpuOfferFilters = {}): Promise<Gp
   }
 
   const catalog = rawOffers.map(normalizeOffer).filter((offer): offer is GpuOffer => offer !== null);
-  const gpuModels = Array.from(new Set(catalog.map((offer) => offer.gpuName))).sort((a, b) => a.localeCompare(b));
+  // The model filter lists every model the marketplace knows, not only the ones
+  // in this page of cheapest offers, so high-end GPUs can be selected at all.
+  const gpuModels = Array.from(new Set([...catalogModels, ...catalog.map((offer) => offer.gpuName)])).sort((a, b) => a.localeCompare(b));
   const offers = applyFilters(catalog, filters);
 
   return { offers, total: catalog.length, gpuModels };

@@ -74,13 +74,13 @@ const VRAM_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
 ];
 
 const priceLabel = (value: number | null) =>
-  value === null ? "\u2014" : `$${value < 1 ? value.toFixed(3) : value.toFixed(2)}`;
+  value === null ? "—" : `$${value < 1 ? value.toFixed(3) : value.toFixed(2)}`;
 
 const reliabilityLabel = (value: number | null) =>
-  value === null ? "\u2014" : `${(value * 100).toFixed(value >= 0.995 ? 0 : 1)}%`;
+  value === null ? "—" : `${(value * 100).toFixed(value >= 0.995 ? 0 : 1)}%`;
 
 const vramLabel = (value: number | null) =>
-  value === null ? "\u2014" : `${value % 1 === 0 ? value.toFixed(0) : value.toFixed(1)} GB`;
+  value === null ? "—" : `${value % 1 === 0 ? value.toFixed(0) : value.toFixed(1)} GB`;
 
 const gpuInitials = (name: string) => {
   const cleaned = name.replace(/[^A-Za-z0-9 ]+/g, " ").trim();
@@ -125,7 +125,7 @@ const queryFor = (filters: Filters): string => {
 const unreachableFailure = (): Failure => ({
   title: "Offers could not be loaded",
   message: `${UNAVAILABLE}. We could not reach the offers service from this workspace.`,
-  hint: "Check your connection, then retry \u2014 browsing resumes as soon as the service answers.",
+  hint: "Check your connection, then retry — browsing resumes as soon as the service answers.",
 });
 
 const timeoutFailure = (): Failure => ({
@@ -137,7 +137,7 @@ const timeoutFailure = (): Failure => ({
 const malformedFailure = (): Failure => ({
   title: "Unexpected response",
   message: "The marketplace replied with something this page could not read, so nothing is shown instead of stale numbers.",
-  hint: "Retry in a moment \u2014 this is usually a transient upstream issue.",
+  hint: "Retry in a moment — this is usually a transient upstream issue.",
 });
 
 const rateLimitedFailure = (seconds: number | null): Failure => ({
@@ -224,10 +224,10 @@ function LaunchControl() {
           disabled
           aria-disabled="true"
           title={LAUNCH_UNAVAILABLE_COPY}
-          aria-label={`Launch \u2014 ${LAUNCH_UNAVAILABLE_COPY.toLowerCase()}`}
+          aria-label={`Launch — ${LAUNCH_UNAVAILABLE_COPY.toLowerCase()}`}
         >
           Launch
-          <span className="gpu-launch-arrow" aria-hidden="true">\u2197</span>
+          <span className="gpu-launch-arrow" aria-hidden="true">↗</span>
         </button>
         <span className="gpu-launch-state">
           <i aria-hidden="true" /> NOT AVAILABLE YET
@@ -253,7 +253,7 @@ function OfferCard({ offer }: { offer: GpuOffer }) {
       <h3>{offer.gpuName}</h3>
       <p className="gpu-offer-location">{offer.location ?? "Location not reported"}</p>
       <ul className="gpu-tags">
-        {offer.gpuCount !== null && <li>{offer.gpuCount} \u00d7 GPU</li>}
+        {offer.gpuCount !== null && <li>{offer.gpuCount} × GPU</li>}
         {offer.inetDownMbps !== null && <li>{Math.round(offer.inetDownMbps)} Mbps down</li>}
         {offer.cpuCores !== null && <li>{offer.cpuCores} CPU cores</li>}
         {offer.ramGb !== null && <li>{vramLabel(offer.ramGb)} host RAM</li>}
@@ -276,7 +276,7 @@ function OfferCard({ offer }: { offer: GpuOffer }) {
           {priceLabel(offer.hourlyPriceUsd)}
           <small>/ HR</small>
         </span>
-        <span className="gpu-offer-id">{offer.id === null ? "OFFER \u00b7 \u2014" : `OFFER \u00b7 ${offer.id}`}</span>
+        <span className="gpu-offer-id">{offer.id === null ? "OFFER · —" : `OFFER · ${offer.id}`}</span>
       </div>
       <LaunchControl />
     </article>
@@ -315,15 +315,15 @@ function OfferSkeletons() {
 function RetryButton({ onRetry, busy, label = "Retry" }: { onRetry: () => void; busy: boolean; label?: string }) {
   return (
     <button className="gpu-pill is-warm" type="button" onClick={onRetry} disabled={busy}>
-      {busy ? "Retrying\u2026" : label}
-      <span aria-hidden="true">\u21bb</span>
+      {busy ? "Retrying…" : label}
+      <span aria-hidden="true">↻</span>
     </button>
   );
 }
 
 /**
  * Browse-only GPU marketplace page. Offers are read from the authenticated
- * backend endpoint, which holds the provider credential server-side \u2014 the browser
+ * backend endpoint, which holds the provider credential server-side — the browser
  * never talks to the provider and never handles an API key. Nothing here rents an
  * instance: the Launch control on each card is a disabled stub.
  */
@@ -373,7 +373,7 @@ export default function GpuPage() {
     return () => window.clearTimeout(timer);
   }, [desiredQuery, desiredActive, applied.query, applied.active]);
 
-  // "Still working" hint for slow networks \u2014 shown without blocking the page.
+  // "Still working" hint for slow networks — shown without blocking the page.
   useEffect(() => {
     if (!pending) {
       setSlow(false);
@@ -531,7 +531,7 @@ export default function GpuPage() {
   }, []);
 
   if (!ready || !authenticated) {
-    return <main className="gpu-gate">{ready ? "Redirecting to sign in\u2026" : "Restoring your session\u2026"}</main>;
+    return <main className="gpu-gate">{ready ? "Redirecting to sign in…" : "Restoring your session…"}</main>;
   }
 
   const loadingInitial = state === "loading";
@@ -539,14 +539,14 @@ export default function GpuPage() {
   const showErrorPanel = state === "error" && !hasResults;
   const showEmpty = state === "ready" && !hasResults;
   const statusCopy = pending
-    ? "Updating offers\u2026"
+    ? "Updating offers…"
     : state === "error"
       ? "Marketplace unavailable"
       : applied.active
         ? "Filters applied"
         : "Showing the full marketplace";
   const scopeCopy = loadingInitial
-    ? "\u2014"
+    ? "—"
     : applied.active
       ? `${offers.length} of ${catalogTotal} in catalog`
       : `${catalogTotal || offers.length} in catalog`;
@@ -557,11 +557,11 @@ export default function GpuPage() {
         <div className="gpu-heading-copy">
           <span className="gpu-kicker">WORKSPACE / COMPUTE LAYER</span>
           <h1>GPUs<span>.</span></h1>
-          <p className="gpu-subtitle">Live marketplace availability read through this workspace. Browsing is free \u2014 nothing is rented from this page.</p>
+          <p className="gpu-subtitle">Live marketplace availability read through this workspace. Browsing is free — nothing is rented from this page.</p>
         </div>
         <button className="gpu-pill gpu-refresh" type="button" onClick={refresh} disabled={pending}>
           {pending ? "Refreshing" : "Refresh"}
-          <span aria-hidden="true">\u21bb</span>
+          <span aria-hidden="true">↻</span>
         </button>
       </header>
 
@@ -573,7 +573,7 @@ export default function GpuPage() {
               type="search"
               value={filters.search}
               onChange={(event) => update("search", event.target.value)}
-              placeholder="GPU model, location, offer\u2026"
+              placeholder="GPU model, location, offer…"
               aria-label="Search GPU offers"
               autoComplete="off"
             />
@@ -640,7 +640,7 @@ export default function GpuPage() {
           <span className="gpu-results-meta">
             {loadingInitial
               ? "QUERYING THE MARKETPLACE"
-              : `${offers.length} ${offers.length === 1 ? "OFFER" : "OFFERS"} \u00b7 ${gpuModels.length} ${gpuModels.length === 1 ? "MODEL" : "MODELS"}`}
+              : `${offers.length} ${offers.length === 1 ? "OFFER" : "OFFERS"} · ${gpuModels.length} ${gpuModels.length === 1 ? "MODEL" : "MODELS"}`}
           </span>
         </div>
 
@@ -651,7 +651,7 @@ export default function GpuPage() {
 
         {slow && (
           <p className="gpu-slow-hint" role="status">
-            Still loading \u2014 the marketplace is responding slowly. Filters stay editable while this finishes.
+            Still loading — the marketplace is responding slowly. Filters stay editable while this finishes.
           </p>
         )}
 
@@ -665,7 +665,7 @@ export default function GpuPage() {
         {loadingInitial ? (
           <>
             <p className="gpu-loading-line" role="status">
-              <span className="gpu-spinner" aria-hidden="true" /> Reading live availability from the marketplace\u2026
+              <span className="gpu-spinner" aria-hidden="true" /> Reading live availability from the marketplace…
             </p>
             <OfferSkeletons />
           </>
@@ -676,7 +676,7 @@ export default function GpuPage() {
               <span className="gpu-panel-overline">UNAVAILABLE</span>
               <h2>{failure?.title ?? "Offers could not be loaded"}</h2>
               <p>{failure?.message ?? `${UNAVAILABLE}. The marketplace may be unreachable right now; your workspace is unaffected.`}</p>
-              <p className="gpu-panel-hint">{failure?.hint ?? "Retry in a moment \u2014 browsing resumes as soon as the service answers."}</p>
+              <p className="gpu-panel-hint">{failure?.hint ?? "Retry in a moment — browsing resumes as soon as the service answers."}</p>
               <div className="gpu-panel-actions">
                 <RetryButton onRetry={retry} busy={pending} />
                 {desiredActive && (
@@ -689,7 +689,7 @@ export default function GpuPage() {
           </div>
         ) : showEmpty && applied.active && catalogTotal > 0 ? (
           <div className="gpu-panel" role="status">
-            <span className="gpu-panel-mark" aria-hidden="true">\u2315</span>
+            <span className="gpu-panel-mark" aria-hidden="true">⌕</span>
             <div className="gpu-panel-body">
               <span className="gpu-panel-overline">NO OFFERS FOUND</span>
               <h2>No offers match these filters</h2>
@@ -697,25 +697,25 @@ export default function GpuPage() {
               <div className="gpu-panel-actions">
                 <button className="gpu-pill" type="button" onClick={resetFilters}>Reset filters</button>
                 <button className="gpu-pill" type="button" onClick={refresh} disabled={pending}>
-                  {pending ? "Refreshing\u2026" : "Refresh \u21bb"}
+                  {pending ? "Refreshing…" : "Refresh ↻"}
                 </button>
               </div>
             </div>
           </div>
         ) : showEmpty ? (
           <div className="gpu-panel" role="status">
-            <span className="gpu-panel-mark" aria-hidden="true">\u2726</span>
+            <span className="gpu-panel-mark" aria-hidden="true">✦</span>
             <div className="gpu-panel-body">
               <span className="gpu-panel-overline">NO OFFERS FOUND</span>
               <h2>No offers found</h2>
               <p>
                 {applied.active
                   ? "No rentable machines matched this query. Loosen a filter or refresh to ask the marketplace again."
-                  : "The marketplace returned no rentable machines at this moment. Nothing is wrong with your account \u2014 check back shortly."}
+                  : "The marketplace returned no rentable machines at this moment. Nothing is wrong with your account — check back shortly."}
               </p>
               <div className="gpu-panel-actions">
                 <button className="gpu-pill" type="button" onClick={refresh} disabled={pending}>
-                  {pending ? "Checking\u2026" : "Check again \u21bb"}
+                  {pending ? "Checking…" : "Check again ↻"}
                 </button>
                 {desiredActive && (
                   <button className="gpu-pill" type="button" onClick={resetFilters}>
@@ -733,7 +733,7 @@ export default function GpuPage() {
           </div>
         )}
 
-        <p className="gpu-footnote">Offer data is read-only availability from the compute provider, served through this workspace. Launch is not available yet \u2014 prices are provider hourly rates and exclude any workspace allowance.</p>
+        <p className="gpu-footnote">Offer data is read-only availability from the compute provider, served through this workspace. Launch is not available yet — prices are provider hourly rates and exclude any workspace allowance.</p>
       </section>
     </>
   );

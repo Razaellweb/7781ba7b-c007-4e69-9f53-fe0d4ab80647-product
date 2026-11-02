@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { listGpuOffers, VastUnavailableError, GPU_OFFERS_UNAVAILABLE_MESSAGE } from "../../lib/server/vast";
+import { listGpuOffers, resetGpuModelCatalogCache, searchGpuOffers, VastUnavailableError, GPU_OFFERS_UNAVAILABLE_MESSAGE } from "../../lib/server/vast";
+import { VAST_API_KEY_PLACEHOLDER } from "../../lib/server/config";
 
 // These tests lock the Vast.ai credential boundary: the key is server-only, it
 // travels exclusively as an Authorization Bearer header, and every credential or
@@ -8,6 +9,7 @@ import { listGpuOffers, VastUnavailableError, GPU_OFFERS_UNAVAILABLE_MESSAGE } f
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  resetGpuModelCatalogCache();
 });
 
 const offer = {
@@ -26,6 +28,19 @@ const offer = {
   disk_space: 64,
 };
 
+// Answers the model-catalog lookup with a small catalog and every offers query
+// with `offersResponse()`. A fresh Response per call, because a body can only be
+// read once.
+const mockMarketplace = (offersResponse: () => Response) =>
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+    String(input).includes("/gpu_names/unique/")
+      ? new Response(JSON.stringify({ success: true, gpu_names: ["A100 SXM4", "RTX 4090"] }), { status: 200 })
+      : offersResponse(),
+  );
+
+const offersCall = (fetchMock: ReturnType<typeof mockMarketplace>) =>
+  fetchMock.mock.calls.find(([url]) => String(url).includes("/bundles/")) ?? [];
+
 // Serializes everything an error could expose so a test can assert the key and
 // upstream text never appear anywhere in it.
 const describeError = (error: unknown) => JSON.stringify({
@@ -38,13 +53,13 @@ const describeError = (error: unknown) => JSON.stringify({
 describe("Vast.ai offers credential boundary", () => {
   it("attaches the server-held key as a Bearer header and never in the URL", async () => {
     vi.stubEnv("VAST_API_KEY", "server-only-vast-key");
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    const fetchMock = mockMarketplace(() =>
       new Response(JSON.stringify({ offers: [offer] }), { status: 200, headers: { "content-type": "application/json" } }),
     );
 
     const offers = await listGpuOffers({ gpuName: "rtx 4090", limit: 5 });
 
-    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    const [url, init] = offersCall(fetchMock);
     expect(String(url)).not.toContain("server-only-vast-key");
     expect(String(url)).not.toContain("api_key=");
     expect(String(url).startsWith("https://console.vast.ai/api/v0/bundles/?q=")).toBe(true);
@@ -57,13 +72,13 @@ describe("Vast.ai offers credential boundary", () => {
 
   it("sends the normalized filter DSL without leaking the key", async () => {
     vi.stubEnv("VAST_API_KEY", "server-only-vast-key");
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ offers: [] }), { status: 200 }));
+    const fetchMock = mockMarketplace(() => new Response(JSON.stringify({ offers: [] }), { status: 200 }));
 
     await listGpuOffers({ gpuName: "rtx 4090", minReliability: 0.98, maxPricePerHour: 1, limit: 3 });
 
-    const url = String(fetchMock.mock.calls[0]?.[0]);
+    const url = String(offersCall(fetchMock)[0]);
     const query = JSON.parse(decodeURIComponent(url.split("q=")[1] ?? "")) as Record<string, unknown>;
-    expect(query.gpu_name).toEqual({ eq: "RTX_4090" });
+    expect(query.gpu_name).toEqual({ eq: "RTX 4090" });
     expect(query.reliability2).toEqual({ gte: 0.98 });
     expect(query.dph_total).toEqual({ lte: 1 });
     expect(query.limit).toBe(3);
@@ -82,9 +97,24 @@ describe("Vast.ai offers credential boundary", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("treats the seeded placeholder value as a missing key", async () => {
+    vi.stubEnv("VAST_API_KEY", VAST_API_KEY_PLACEHOLDER);
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    let caught: unknown;
+    try { await searchGpuOffers(); } catch (error) { caught = error; }
+
+    expect(caught).toBeInstanceOf(VastUnavailableError);
+    expect((caught as VastUnavailableError).kind).toBe("unconfigured");
+    expect((caught as VastUnavailableError).retryable).toBe(false);
+    // The placeholder is never sent upstream as if it were a credential.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("treats Vast.ai's 404 auth_error envelope as a rejected credential without echoing it", async () => {
     vi.stubEnv("VAST_API_KEY", "revoked-key-value");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    mockMarketplace(() =>
       new Response(JSON.stringify({ success: false, error: "auth_error", msg: "Invalid user key" }), { status: 404 }),
     );
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -99,11 +129,12 @@ describe("Vast.ai offers credential boundary", () => {
     expect(serialized).not.toContain("auth_error");
     expect((caught as VastUnavailableError).message).toBe(GPU_OFFERS_UNAVAILABLE_MESSAGE);
     expect((caught as VastUnavailableError).retryable).toBe(false);
+    expect((caught as VastUnavailableError).kind).toBe("credentials_rejected");
   });
 
   it("does not leak upstream status text on a generic upstream failure", async () => {
     vi.stubEnv("VAST_API_KEY", "server-only-vast-key");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("internal stack trace and hostnames", { status: 502 }));
+    mockMarketplace(() => new Response("internal stack trace and hostnames", { status: 502 }));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     let caught: unknown;

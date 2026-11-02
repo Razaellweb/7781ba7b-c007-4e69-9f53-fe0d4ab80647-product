@@ -22,4 +22,8 @@ export function openRouterConfig() { const enabled = (optional("OPENROUTER_ENABL
 // body, or written to a log. Like openRouterConfig(), a disabled/missing key is a
 // normal configuration state rather than a hard crash, so the offers endpoint can
 // degrade to a sanitized "temporarily unavailable" response.
-export function vastConfig() { const apiKey = optional("VAST_API_KEY"); if (!apiKey) return { enabled: false as const, apiKey: undefined, baseUrl: undefined }; return { enabled: true as const, apiKey, baseUrl: (optional("VAST_API_BASE_URL") ?? "https://console.vast.ai/api/v0").replace(/\/+$/, "") }; }
+// The project's environment settings are seeded with VAST_API_KEY_PLACEHOLDER so
+// the variable is visible and editable before a real key exists. The placeholder
+// counts as a missing key: it is reported as "unconfigured" and never sent upstream.
+export const VAST_API_KEY_PLACEHOLDER = "REPLACE_WITH_YOUR_VAST_API_KEY";
+export function vastConfig() { const raw = optional("VAST_API_KEY"); const apiKey = raw === VAST_API_KEY_PLACEHOLDER ? undefined : raw; if (!apiKey) return { enabled: false as const, apiKey: undefined, baseUrl: undefined }; return { enabled: true as const, apiKey, baseUrl: (optional("VAST_API_BASE_URL") ?? "https://console.vast.ai/api/v0").replace(/\/+$/, "") }; }

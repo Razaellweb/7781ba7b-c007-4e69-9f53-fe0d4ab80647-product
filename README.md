@@ -45,6 +45,13 @@ from the browser. If the key is missing, revoked, or rejected, the offers
 endpoint returns a single sanitized `503` (`GPU offers are temporarily
 unavailable`) with no upstream detail, which the GPU page renders verbatim.
 
+The project's environment settings are seeded with
+`VAST_API_KEY=REPLACE_WITH_YOUR_VAST_API_KEY` so the variable is visible there.
+Replace that value with the account API key from console.vast.ai → Account →
+API Keys, then redeploy. Until then the placeholder is treated exactly like a
+missing key (`kind: "unconfigured"`) and is never sent to Vast.ai.
+`VAST_API_BASE_URL` is optional and defaults to `https://console.vast.ai/api/v0`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
