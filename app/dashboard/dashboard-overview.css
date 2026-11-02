@@ -256,3 +256,68 @@
     padding: 8px;
   }
 }
+
+/* ------------------------------------------------------------------------- */
+/* Provider health badge (Overview header).                                   */
+/* Reads the background health worker's normalized status, so "Operational"   */
+/* is a real probe result rather than a client-side guess.                     */
+/* ------------------------------------------------------------------------- */
+.compute-dashboard .compute-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.compute-dashboard .provider-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  border: 1px solid #ffffff1f;
+  border-radius: 999px;
+  background: #ffffff08;
+  padding: 6px 12px;
+  color: #c4ccd4;
+  font: 9px var(--font-geist-mono), monospace;
+  letter-spacing: .12em;
+  white-space: nowrap;
+  cursor: default;
+}
+.compute-dashboard .provider-health i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.compute-dashboard .provider-health small {
+  color: #8d99a5;
+  font-size: 8px;
+  letter-spacing: .06em;
+}
+.compute-dashboard .provider-health.ok {
+  color: #86d5a4;
+}
+.compute-dashboard .provider-health.warn {
+  color: #f0c98c;
+}
+.compute-dashboard .provider-health.bad {
+  color: #e8a094;
+}
+.compute-dashboard .provider-health.unknown {
+  color: #97a3af;
+}
+@media (max-width: 620px) {
+  .compute-dashboard .provider-health {
+    padding: 5px 10px;
+    font-size: 8px;
+  }
+  .compute-dashboard .provider-health small {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .compute-dashboard .provider-health i {
+    transition: none;
+  }
+}

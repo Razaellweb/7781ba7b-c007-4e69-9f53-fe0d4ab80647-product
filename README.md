@@ -29,10 +29,66 @@ in an API response, or accepted from a request body or query string.
 | Variable | Purpose |
 | --- | --- |
 | `PRIVY_APP_ID` / `PRIVY_APP_SECRET` | Privy session verification (the only access requirement). |
-| `OPENROUTER_ENABLED`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` | Inference provider. |
+| `INFERENCE_PROVIDER`, `INFERENCE_FALLBACK_PROVIDER` | Which inference transport serves tokens (`vast` or `openrouter`). |
+| `OPENROUTER_ENABLED`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` | OpenRouter inference transport. |
+| `VAST_INFERENCE_BASE_URL`, `VAST_INFERENCE_API_KEY` | vast.ai GPU instance inference transport (vLLM / OpenAI-compatible). |
 | `VAST_API_KEY`, `VAST_API_BASE_URL` | Vast.ai GPU marketplace offers for `/api/gpu/offers`. |
 | `DATABASE_URL` (or `PGHOST`…) | Postgres connection. |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Rate limiting and short-lived cache. |
+
+### Inference providers
+
+Every caller depends on the `InferenceProvider` interface in
+`lib/server/inference.ts`, never on a concrete provider. `lib/server/provider.ts`
+chooses the implementation from configuration and composes an optional fallback:
+
+- `INFERENCE_PROVIDER=vast` selects `VastAIProvider` (`lib/server/vast-inference.ts`).
+- Any other value, including the default, selects `OpenRouterProvider`.
+- `INFERENCE_FALLBACK_PROVIDER` names the other provider. The fallback is used when
+  the primary reports itself unhealthy, or when a stream fails with a retryable
+  error **before any content was delivered**. A stream that already rendered tokens
+  is never replayed from a different provider.
+- A provider with no credentials configured is never selected, so the product keeps
+  serving through whichever transport actually works.
+
+Both providers implement the same normalized contract: `stream()` yields
+`delta` / `complete` / `error` chunks, `health()` returns
+`{ healthy, status, latencyMs, modelIds }`, and failures collapse into the shared
+taxonomy (`authentication`, `rate_limited`, `timeout`, `upstream`,
+`unsupported_model`, `cancelled`, `invalid_request`) so the Playground, the API
+gateway, and the compute ledger never see an upstream status code or error body.
+
+### vast.ai inference transport
+
+`VastAIProvider` talks to a rented vast.ai GPU instance running vLLM (or any
+OpenAI-compatible server). Unlike the marketplace integration in
+`lib/server/vast.ts` — which holds `VAST_API_KEY` — the instance is protected by
+its own service key, so inference never needs marketplace authority.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAST_INFERENCE_BASE_URL` | none | Instance root, e.g. `http://<ip>:<port>/v1`. Unset means the provider reports itself unavailable. |
+| `VAST_INFERENCE_API_KEY` | none | The instance's `--api-key`; sent only as a bearer header. |
+| `VAST_INFERENCE_TIMEOUT_MS` | `120000` | Whole-request deadline. |
+| `VAST_INFERENCE_IDLE_TIMEOUT_MS` | `45000` | A stream that produces no bytes for this long is aborted as `timeout`. |
+| `VAST_INFERENCE_HEALTH_TIMEOUT_MS` | `8000` | `/v1/models` probe deadline. |
+| `VAST_INFERENCE_TOKENS_PER_SECOND` | `40` | Estimated decode throughput, used to price GPU-hour economics. |
+| `VAST_INFERENCE_PROMPT_USD_PER_TOKEN` | `0.00000015` | Default prompt price when the model carries none. |
+| `VAST_INFERENCE_COMPLETION_USD_PER_TOKEN` | `0.0000005` | Default completion price when the model carries none. |
+
+Behaviour worth knowing:
+
+- **Cancellation:** the Playground Stop button aborts the request, which tears down
+  the upstream HTTP connection so the GPU stops generating. The provider then emits
+  a `cancelled` terminal event, and the partial answer is persisted with
+  `partial = true` rather than being discarded.
+- **Idle stalls:** a server that holds the connection open without sending bytes is
+  aborted and reported as `timeout`.
+- **Malformed SSE frames** are skipped and logged with the operation key; they never
+  crash a working stream.
+- **Missing usage** falls back to a token estimate that is flagged
+  `uncertain: true`, which marks the inference for reconciliation in the ledger.
+- **Empty completions** settle with zero usage and zero provider cost.
 
 ### Vast.ai credential boundary
 
@@ -72,7 +128,9 @@ credit and charged to the user's compute balance at the provider price times
   stale rentals, and a daily Vercel cron (`/api/gpu/sweep`, authorized by
   `CRON_SECRET`) catches anything left.
 - **Setups:** only curated images run: a PyTorch JupyterLab notebook and a vLLM
-  OpenAI-compatible model server with a per-machine API key.
+  OpenAI-compatible model server with a per-machine API key. Pointing
+  `VAST_INFERENCE_BASE_URL` at that server's `http://<ip>:<port>/v1` makes it the
+  product's inference provider.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

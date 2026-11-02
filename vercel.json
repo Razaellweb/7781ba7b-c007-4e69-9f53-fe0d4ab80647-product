@@ -7,6 +7,14 @@
     {
       "path": "/api/gpu/sweep",
       "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/gpu/health-cycle",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/compute/reconcile",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

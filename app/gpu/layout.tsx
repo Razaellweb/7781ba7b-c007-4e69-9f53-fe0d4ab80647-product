@@ -3,9 +3,10 @@ import WorkspaceShell from "../../components/WorkspaceShell";
 import "../dashboard/dashboard.css";
 import "../dashboard-dark.css";
 import "./gpu.css";
+import "./diagnostics.css";
 
 export const metadata: Metadata = {
-  title: "GPU offers · Openweight",
+  title: "GPU offers \u00b7 Openweight",
   description: "Browse live GPU marketplace availability: model, VRAM, hourly price, reliability, and location.",
 };
 
