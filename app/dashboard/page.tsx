@@ -1,55 +1,62 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import WorkspaceShell from "../../components/WorkspaceShell";
+import ModelLogo from "../../components/ModelLogo";
 import "./dashboard.css";
 import "./dashboard-overview.css";
 
 type SessionState = "loading" | "ready" | "error" | "unauthenticated";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Activity = { operation_key: string; model: string; status: string; input_tokens: number | null; output_tokens: number | null; user_debit_micro_usd: string | null; created_at: string };
-type Model = { id: string; displayName: string; family: string | null; featured: boolean; registryStatus: string; provider: string; providerModelSlug: string; sourceUrl: string | null; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; licenseStatus: string; providerTermsStatus: string; availability: "available" | "unavailable" | "stale"; syncStatus: string };
+type Model = { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; sourceUrl: string | null; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; licenseStatus: string; providerTermsStatus: string; availability: "available" | "unavailable" | "stale"; syncStatus: string };
 type AccountResponse = { account: { walletAddress: string | null } };
+type AllowanceResponse = { balance?: { available?: string }; allowance?: { amount_micro_usd?: string; period_end?: string } | null };
 
 const clampMicroUsd = (micro: string | null | undefined) => { try { const value = BigInt(micro ?? "0"); return value > 0n ? value : 0n; } catch { return 0n; } };
 const formatMicroUsd = (micro: string | null | undefined) => { const value = clampMicroUsd(micro); const whole = value / 1_000_000n; const fraction = (value % 1_000_000n).toString().padStart(6, "0"); return `$${whole.toString()}.${fraction}`; };
 const compactUsd = (micro: string | null | undefined) => micro == null ? "\u2014" : formatMicroUsd(micro);
-const contextLabel = (value: number | null) => { if (value == null || value <= 0) return null; return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M tokens` : `${Math.round(value / 1000)}K tokens`; };
 const relativeTime = (iso: string) => { const timestamp = new Date(iso).getTime(); if (Number.isNaN(timestamp)) return ""; const minutes = Math.floor(Math.max(0, Date.now() - timestamp) / 60000); if (minutes < 1) return "Just now"; if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; };
 const unavailable = "Unavailable";
 const pricingValue = (pricing: Record<string, string> | null, keys: string[]) => { const key = keys.find((candidate) => pricing?.[candidate] != null); const numeric = key ? Number(pricing?.[key]) : NaN; return Number.isFinite(numeric) && numeric >= 0 ? `$${(numeric * 1_000_000).toFixed(2)} / 1M tokens` : null; };
 const operational = (model: Model) => model.registryStatus === "active" && model.syncStatus === "current" && model.availability === "available";
-const statusLabel = (model: Model) => model.registryStatus === "paused" ? "Paused" : model.availability === "stale" || model.syncStatus === "stale" ? "Metadata stale" : model.availability === "unavailable" || model.syncStatus === "unavailable" || model.syncStatus === "never" ? "Unavailable" : operational(model) ? "Operational" : model.registryStatus.replaceAll("_", " ");
-const isDeepSeekModel = (model: Model) => /deepseek/i.test(`${model.family ?? ""} ${model.displayName} ${model.providerModelSlug}`);
-const isKimiModel = (model: Model) => /kimi/i.test(`${model.family ?? ""} ${model.displayName}`);
-const isZaiGlmModel = (model: Model) => /glm/i.test(model.family ?? "") || /^z-ai\//i.test(model.providerModelSlug);
-const isQwenModel = (model: Model) => /qwen/i.test(`${model.family ?? ""} ${model.displayName} ${model.providerModelSlug}`);
-const modelBrandLogo = (model: Model) => {
-  if (isDeepSeekModel(model)) return { src: "https://github.com/deepseek-ai/DeepSeek-V2/blob/main/figures/logo.svg?raw=true", alt: "DeepSeek" };
-  if (isZaiGlmModel(model)) return { src: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg", alt: "Z.ai GLM" };
-  if (isKimiModel(model)) return { src: "https://moonshotai.github.io/Branding-Guide/scenarios/03-icon-without-kimi/kimi-icon-rounded-corner.png", alt: "Kimi" };
-  if (isQwenModel(model)) return { src: "https://img.alicdn.com/imgextra/i1/O1CN01Pzz5rH1SIBQeVFb7w_!!6000000002223-55-tps-32-32.svg", alt: "Qwen" };
-  return null;
+const statusLabel = (model: Model) => model.registryStatus === "paused" ? "Paused" : model.availability === "stale" || model.syncStatus === "stale" ? "Metadata stale" : model.availability === "unavailable" || model.syncStatus === "unavailable" || model.syncStatus === "never" ? "Unavailable" : operational(model) ? "Available" : model.registryStatus.replaceAll("_", " ");
+const creatorLabel = (model: Model) => model.providerLabel?.trim() || model.family?.trim() || model.provider;
+// Cards carry a one-line, plain-language description rather than raw provider
+// metadata. Long names and descriptions wrap inside the card.
+const cardSummary = (model: Model) => {
+  const description = model.description?.trim();
+  if (description) return description;
+  const context = model.contextLength && model.contextLength > 0 ? (model.contextLength >= 1_000_000 ? `${(model.contextLength / 1_000_000).toFixed(model.contextLength % 1_000_000 === 0 ? 0 : 1)}M token context` : `${Math.round(model.contextLength / 1000)}K token context`) : null;
+  return context ?? "Ready to use through your compute allowance.";
+};
+// A model identifier appears once. Duplicate registry rows never render twice.
+const dedupeModels = (models: Model[]) => { const seen = new Set<string>(); const unique: Model[] = []; for (const model of models) { const key = (model.id || "").trim().toLowerCase(); if (!key || seen.has(key)) continue; seen.add(key); unique.push(model); } return unique; };
+const summarizeUsage = (activity: Activity[]) => {
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const recent = activity.filter((item) => { const time = new Date(item.created_at).getTime(); return Number.isFinite(time) && time >= cutoff; });
+  const spend = recent.reduce((total, item) => total + clampMicroUsd(item.user_debit_micro_usd), 0n);
+  const models = new Set(activity.map((item) => item.model).filter(Boolean));
+  return { spendMicroUsd: spend.toString(), requests: activity.length, modelsUsed: models.size };
 };
 
-function StatusPanel({ title, body, action }: { title: string; body: string; action?: ReactNode }) { return <div className="compute-status-panel"><span className="compute-status-mark"></span><div><h2>{title}</h2><p>{body}</p>{action}</div></div>; }
+function StatusPanel({ title, body, action }: { title: string; body: string; action?: ReactNode }) { return <div className="compute-status-panel"><span className="compute-status-mark">!</span><div><h2>{title}</h2><p>{body}</p>{action}</div></div>; }
+
 function ModelCard({ model, onOpen }: { model: Model; onOpen: (model: Model, control: HTMLButtonElement) => void }) {
   const isOperational = operational(model);
-  const inputPrice = pricingValue(model.pricing, ["prompt", "input"]);
-  const outputPrice = pricingValue(model.pricing, ["completion", "output"]);
-  const modalities = model.architecture?.inputModalities ?? [];
-  const brandLogo = modelBrandLogo(model);
-  return <button type="button" className={`compute-model-card ${!isOperational ? "is-gated" : ""}`} onClick={(event) => onOpen(model, event.currentTarget)} aria-label={`View details for ${model.displayName}`}>
-    <div className="model-card-top"><span className="model-glyph"><span>{(model.family || model.displayName).slice(0, 2).toUpperCase()}</span>{brandLogo && <img className="model-logo" src={brandLogo.src} alt="" aria-label={`${brandLogo.alt} logo`} onError={(event) => { event.currentTarget.style.display = "none"; }} />}</span><span className={`model-status ${isOperational ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {statusLabel(model)}</span></div>
-    <h3>{model.displayName}{isDeepSeekModel(model) && <img className="model-brand-icon" src="https://github.com/deepseek-ai/DeepSeek-V2/blob/main/figures/logo.svg?raw=true" alt="DeepSeek logo" onError={(event) => { event.currentTarget.hidden = true; }} />}{isZaiGlmModel(model) && <span className="model-brand-lockup"><img className="model-brand-icon" src="https://z-cdn.chatglm.cn/z-ai/static/logo.svg" alt="Z.ai logo" onError={(event) => { event.currentTarget.hidden = true; }} /><span>Z.ai (GLM)</span></span>}{isKimiModel(model) && <img className="model-brand-icon" src="https://moonshotai.github.io/Branding-Guide/scenarios/03-icon-without-kimi/kimi-icon-rounded-corner.png" alt="Kimi logo" onError={(event) => { event.currentTarget.hidden = true; }} />}{isQwenModel(model) && <img className="model-brand-icon" src="https://img.alicdn.com/imgextra/i1/O1CN01Pzz5rH1SIBQeVFb7w_!!6000000002223-55-tps-32-32.svg" alt="Qwen logo" onError={(event) => { event.currentTarget.hidden = true; }} />}</h3>{model.family && <p>{model.family}</p>}
-    <div className="model-tags">{contextLabel(model.contextLength) && <span className="model-tag">{contextLabel(model.contextLength)} context</span>}{modalities.slice(0, 2).map((modality) => <span className="model-tag" key={modality}>{modality} input</span>)}{model.featured && <span className="model-tag">Featured</span>}</div>
-    {(inputPrice || outputPrice) && <p className="model-card-pricing">{inputPrice ? `${inputPrice.replace(" / 1M tokens", "")} in` : "Input pricing unavailable"}{outputPrice ? `  ${outputPrice.replace(" / 1M tokens", "")} out` : ""}</p>}
-    <span className="model-card-action">View model details <span aria-hidden="true">\u2197</span></span>
+  return <button type="button" className={`compute-model-card ${!isOperational ? "is-gated" : ""}`} onClick={(event) => onOpen(model, event.currentTarget)} aria-label={`Open ${model.displayName}`}>
+    <div className="model-card-top"><span className="model-glyph"><ModelLogo model={model} /></span><span className={`model-status ${isOperational ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {statusLabel(model)}</span></div>
+    <h3>{model.displayName}</h3>
+    <p className="model-card-by">by {creatorLabel(model)}</p>
+    <p className="model-card-summary">{cardSummary(model)}</p>
+    <span className="model-card-arrow" aria-hidden="true"><span>\u2192</span></span>
   </button>;
 }
+
 function CopyButton({ value, label, onCopied }: { value: string; label: string; onCopied: (message: string) => void }) { const copy = async () => { try { if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable"); await navigator.clipboard.writeText(value); onCopied(`${label} copied`); } catch { onCopied("Copy unavailable \u2014 select the readable text to copy it."); } }; return <button type="button" className="model-copy-button" onClick={() => void copy()} aria-label={`Copy ${label}`}><span aria-hidden="true">\u25a3</span> Copy</button>; }
 function DetailRow({ label, value }: { label: string; value: string }) { return <div className="model-detail-row"><span>{label}</span><b>{value}</b></div>; }
 function ModelDetails({ model, onClose, onUse, onCopied }: { model: Model; onClose: () => void; onUse: () => void; onCopied: (message: string) => void }) {
@@ -80,14 +87,14 @@ function ModelDetails({ model, onClose, onUse, onCopied }: { model: Model; onClo
   const endpoint = "/api/v1/chat/completions";
   const quickstart = `curl https://openweight.systems${endpoint} \\\n  -H "Authorization: Bearer $OPENWEIGHT_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model.id}","messages":[{"role":"user","content":"Hello"}]}'`;
   return <div className="model-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} className="model-modal" role="dialog" aria-modal="true" aria-labelledby="model-details-title" aria-describedby="model-details-description" tabIndex={-1}>
-    <header className="model-modal-header"><div><div className="compute-card-label">CURATED MODEL \u00b7 {model.provider.toUpperCase()}</div><h2 id="model-details-title">{model.displayName}</h2><p id="model-details-description">{model.family ? `${model.family} family \u00b7 ` : ""}Registry details and current operational state.</p></div><button type="button" className="model-modal-close" onClick={onClose} aria-label="Close model details">\u00d7</button></header>
-    <div className="model-modal-body"><div className="model-detail-identity"><div><span className="model-detail-label">CURATED IDENTIFIER</span><code>{model.id}</code></div><CopyButton value={model.id} label="curated model identifier" onCopied={onCopied} /></div>
+    <header className="model-modal-header"><div><div className="compute-card-label">MODEL \u00b7 {creatorLabel(model).toUpperCase()}</div><h2 id="model-details-title">{model.displayName}</h2><p id="model-details-description">{model.description?.trim() || (model.family ? `${model.family} family \u00b7 ` : "") + "Registry details and current operational state."}</p></div><button type="button" className="model-modal-close" onClick={onClose} aria-label="Close model details">\u00d7</button></header>
+    <div className="model-modal-body"><div className="model-detail-identity"><div><span className="model-detail-label">MODEL IDENTIFIER</span><code>{model.id}</code></div><CopyButton value={model.id} label="model identifier" onCopied={onCopied} /></div>
       <div className="model-detail-identity"><div><span className="model-detail-label">PROVIDER IDENTIFIER \u00b7 SERVER ROUTING ONLY</span><code>{model.providerModelSlug || unavailable}</code></div>{model.providerModelSlug && <CopyButton value={model.providerModelSlug} label="provider model identifier" onCopied={onCopied} />}</div>
       <div className="model-detail-status"><span className={`model-status ${operational(model) ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {status}</span><span className="model-detail-access">Registry \u00b7 {model.registryStatus}</span>{model.sourceUrl ? <a href={model.sourceUrl} target="_blank" rel="noreferrer">Model source \u2197</a> : <span className="model-detail-access">Model source \u00b7 {unavailable}</span>}</div>
       <div className="model-detail-grid"><section className="model-detail-group"><h3>Provider pricing <small>per 1M tokens</small></h3>{input && <DetailRow label="Input" value={input} />}{cachedInput && <DetailRow label="Cached input" value={cachedInput} />}{output && <DetailRow label="Output" value={output} />}{!input && !cachedInput && !output && <DetailRow label="Pricing" value={unavailable} />}</section>
-        {contextLabel(model.contextLength) && <section className="model-detail-group"><h3>Context window</h3><DetailRow label="Context window" value={contextLabel(model.contextLength)!} /></section>}
+        {model.contextLength && model.contextLength > 0 && <section className="model-detail-group"><h3>Context window</h3><DetailRow label="Context window" value={`${model.contextLength.toLocaleString()} tokens`} /></section>}
         <section className="model-detail-group"><h3>Capabilities</h3><DetailRow label="Input modalities" value={model.architecture?.inputModalities?.length ? model.architecture.inputModalities.join(" \u00b7 ") : unavailable} /><DetailRow label="Output modalities" value={model.architecture?.outputModalities?.length ? model.architecture.outputModalities.join(" \u00b7 ") : unavailable} /><DetailRow label="Supported parameters" value={model.supportedParameters?.length ? model.supportedParameters.join(" \u00b7 ") : unavailable} /></section></div>
-      <section className="model-quickstart" aria-labelledby="model-endpoint-heading"><h3 id="model-endpoint-heading">Openweight chat-completions API</h3><p>Supported first-party OpenAI-compatible endpoint. Authenticate with an Openweight API key; use the curated model identifier shown above.</p><div className="model-endpoint-row"><code>POST {endpoint}</code><CopyButton value={endpoint} label="chat-completions endpoint path" onCopied={onCopied} /></div><div className="model-code-heading"><span>QUICKSTART \u00b7 cURL</span><CopyButton value={quickstart} label="chat-completions example" onCopied={onCopied} /></div><pre className="model-code"><code>{quickstart}</code></pre></section>
+      <section className="model-quickstart" aria-labelledby="model-endpoint-heading"><h3 id="model-endpoint-heading">Openweight chat-completions API</h3><p>Supported first-party OpenAI-compatible endpoint. Authenticate with an Openweight API key and use the model identifier shown above.</p><div className="model-endpoint-row"><code>POST {endpoint}</code><CopyButton value={endpoint} label="chat-completions endpoint path" onCopied={onCopied} /></div><div className="model-code-heading"><span>QUICKSTART \u00b7 cURL</span><CopyButton value={quickstart} label="chat-completions example" onCopied={onCopied} /></div><pre className="model-code"><code>{quickstart}</code></pre></section>
       <div className="model-modal-footer">{operational(model) ? <button type="button" className="model-use-button" onClick={onUse}>Try in Playground <span aria-hidden="true">\u2192</span></button> : <p className="model-modal-note">This model is {status.toLowerCase()}. It cannot be used in the Playground until provider availability is restored.</p>}</div>
     </div></section></div>;
 }
@@ -102,6 +109,7 @@ export default function DashboardPage() {
   const [sessionState, setSessionState] = useState<SessionState>("loading");
   const [wallet, setWallet] = useState("");
   const [balanceMicroUsd, setBalanceMicroUsd] = useState<string | null>(null);
+  const [allowanceMicroUsd, setAllowanceMicroUsd] = useState<string | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [computeState, setComputeState] = useState<LoadState>("idle");
@@ -109,19 +117,23 @@ export default function DashboardPage() {
   const [notice, setNotice] = useState("");
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
   const [copyNotice, setCopyNotice] = useState("");
+  const [autoModel, setAutoModel] = useState(false);
   const invokingControl = useRef<HTMLButtonElement | null>(null);
   const loadingWorkspace = useRef(false);
   const authHeaders = useCallback(async () => { const token = await getAccessToken(); if (!token) throw new Error("No authenticated token"); return { Authorization: `Bearer ${token}` }; }, [getAccessToken]);
-  const clearWorkspace = useCallback(() => { setComputeState("idle"); setActivity([]); setBalanceMicroUsd(null); }, []);
-  // The curated registry is public and identity-independent: every authenticated
-  // account sees the full available model list.
+  const clearWorkspace = useCallback(() => { setComputeState("idle"); setActivity([]); setBalanceMicroUsd(null); setAllowanceMicroUsd(null); }, []);
+  // The model list is public and identity-independent: every authenticated
+  // account sees the same available models.
   const loadRegistry = useCallback(async () => {
     setModelsState("loading");
     try {
       const response = await fetch("/api/models", { cache: "no-store" });
       if (!response.ok) throw new Error("MODELS_UNAVAILABLE");
       const data = await response.json() as { models?: Model[] };
-      setModels(Array.isArray(data.models) ? data.models : []);
+      const next = Array.isArray(data.models) ? dedupeModels(data.models) : [];
+      // A failed or empty payload is an error state, never a partial card set.
+      if (next.length === 0) throw new Error("MODELS_EMPTY");
+      setModels(next);
       setModelsState("ready");
     } catch { setModels([]); setModelsState("error"); }
   }, []);
@@ -144,9 +156,10 @@ export default function DashboardPage() {
       setComputeState("loading");
       const [allowanceResponse, activityResponse] = await Promise.all([fetch("/api/allowance", { headers, cache: "no-store" }), fetch("/api/activity", { headers, cache: "no-store" })]);
       if (!allowanceResponse.ok || !activityResponse.ok) { setComputeState("error"); setNotice("Compute data could not be loaded. Refresh to request fresh data."); return; }
-      const allowance = await allowanceResponse.json() as { balance?: { available?: string } };
+      const allowance = await allowanceResponse.json() as AllowanceResponse;
       const activityData = await activityResponse.json() as { activity?: Activity[] };
       setBalanceMicroUsd(allowance.balance?.available ?? null);
+      setAllowanceMicroUsd(allowance.allowance?.amount_micro_usd ?? null);
       setActivity(activityData.activity ?? []);
       setComputeState("ready");
     } catch {
@@ -157,7 +170,7 @@ export default function DashboardPage() {
   }, [authenticated, authHeaders, clearWorkspace, loadRegistry]);
   const closeModelDetails = useCallback(() => { setSelectedModel(null); window.setTimeout(() => invokingControl.current?.focus(), 0); }, []);
   const openModelDetails = useCallback((model: Model, control: HTMLButtonElement) => { invokingControl.current = control; setSelectedModel(model); }, []);
-  // Model selection and Playground entry depend only on the curated model's live
+  // Model selection and Playground entry depend only on the model's live
   // operational state; no account verification is re-confirmed here.
   const openSelectedModel = useCallback(async () => {
     if (!selectedModel) return;
@@ -177,30 +190,100 @@ export default function DashboardPage() {
     } catch { setNotice("Model availability could not be confirmed. No billable request was started."); }
   }, [closeModelDetails, router, selectedModel]);
   const signOut = useCallback(async () => { try { await logout(); } finally { router.replace("/"); } }, [logout, router]);
+  // The Auto-model preference is a client-side selection hint only; it never
+  // changes allowance, billing, or authentication behaviour.
+  const toggleAutoModel = useCallback(() => {
+    setAutoModel((current) => {
+      const next = !current;
+      try { window.localStorage.setItem("openweight.autoModel", next ? "1" : "0"); } catch { /* preference stays in memory */ }
+      return next;
+    });
+  }, []);
   // Unauthenticated visitors are still sent through the Privy entry flow; an
   // authenticated session (including one restored on refresh) never is.
   useEffect(() => { if (ready && !authenticated) router.replace("/signup"); }, [ready, authenticated, router]);
   useEffect(() => { if (ready && authenticated) { void loadData(false); void loadRegistry(); } }, [ready, authenticated, loadData, loadRegistry]);
+  useEffect(() => { try { setAutoModel(window.localStorage.getItem("openweight.autoModel") === "1"); } catch { /* no stored preference */ } }, []);
   useEffect(() => { if (!selectedModel) return; const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") closeModelDetails(); }; window.addEventListener("keydown", onKeyDown); return () => window.removeEventListener("keydown", onKeyDown); }, [closeModelDetails, selectedModel]);
   useEffect(() => { if (!copyNotice) return; const timer = window.setTimeout(() => setCopyNotice(""), 3000); return () => window.clearTimeout(timer); }, [copyNotice]);
+
+  const usage = useMemo(() => summarizeUsage(activity), [activity]);
 
   if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>{ready ? "Redirecting to sign in\u2026" : "Restoring your session\u2026"}</p></div></main>;
   // Session states only. Identity is the access requirement, so nothing here can
   // represent an ownership or verification check.
   const sessionLabels: Record<SessionState, string> = { loading: "RESTORING SESSION", ready: "SIGNED IN", error: "RETRY WORKSPACE", unauthenticated: "AUTH REQUIRED" };
   const sessionDegraded = sessionState === "error" || sessionState === "unauthenticated";
-  const balanceAvailable = balanceMicroUsd !== null && clampMicroUsd(balanceMicroUsd) > 0n;
+  const availableMicro = balanceMicroUsd === null ? null : clampMicroUsd(balanceMicroUsd);
+  const totalMicro = allowanceMicroUsd === null ? null : clampMicroUsd(allowanceMicroUsd);
+  const balanceAvailable = availableMicro !== null && availableMicro > 0n;
   const checking = sessionState === "loading";
-  const registry = <section className="compute-section models-primary"><div className="compute-section-head"><div><div className="compute-card-label">CURATED OPEN-WEIGHT MODELS</div><h2>Discover a model for the work.</h2>{!balanceAvailable && sessionState === "ready" && <p className="compute-insufficient-note">Registry is fully available; the Playground also requires available compute.</p>}</div><Link href="/playground">Open Playground \u2197</Link></div>
-    {modelsState === "loading" || modelsState === "idle" ? <StatusPanel title="Loading the curated registry" body="Fetching the current public model catalog and provider availability. No cached availability is shown." /> : modelsState === "error" ? <div className="models-error" role="alert">The model registry could not be loaded. No previous availability data is shown.<br/><button onClick={() => void loadRegistry()}>Retry registry \u21bb</button></div> : models.length === 0 ? <div className="compute-empty" role="status">The curated registry currently has no public models.</div> : <div className="compute-model-grid">{models.map((model) => <ModelCard key={model.id} model={model} onOpen={openModelDetails} />)}</div>}
+  const percentAvailable = totalMicro && totalMicro > 0n && availableMicro !== null
+    ? Number((availableMicro * 1000n) / totalMicro) / 10
+    : null;
+  const percentLabel = availableMicro === null ? "\u2014" : percentAvailable === null ? (balanceAvailable ? "\u2014" : "0% available") : `${Math.min(100, percentAvailable).toFixed(percentAvailable % 1 === 0 ? 0 : 1)}% available`;
+  const progressWidth = percentAvailable === null ? (balanceAvailable ? 100 : 0) : Math.max(0, Math.min(100, percentAvailable));
+  const allowanceValue = availableMicro === null ? "\u2014" : formatMicroUsd(availableMicro.toString());
+  const allowanceTotal = totalMicro === null ? null : formatMicroUsd(totalMicro.toString());
+
+  const allowance = <section className="compute-allowance" aria-label="Compute allowance">
+    <div className="compute-allowance-main">
+      <div className="compute-card-label">COMPUTE ALLOWANCE</div>
+      {computeState === "idle" || computeState === "loading" ? <div className="compute-allowance-loading" role="status"><span className="compute-allowance-skeleton" /><span className="compute-allowance-skeleton short" /><span className="compute-allowance-skeleton bar" /></div>
+        : <>
+          <div className="compute-allowance-figure">
+            <strong>{allowanceValue}</strong>
+            {allowanceTotal && <span className="compute-allowance-total">/ {allowanceTotal}</span>}
+            <span className={`compute-availability ${balanceAvailable ? "" : "is-muted"}`}><i aria-hidden="true" />{percentLabel}</span>
+          </div>
+          <div className="compute-progress" role="img" aria-label={`${percentLabel} of the current compute allowance`}><span style={{ width: `${progressWidth}%` }} /></div>
+          {!balanceAvailable && computeState === "ready" && <p className="compute-allowance-note">No compute is currently available. Refresh to request an authoritative balance.</p>}
+        </>}
+    </div>
+    <dl className="compute-stats">
+      <div><dt>USAGE (30D)</dt><dd>{computeState === "ready" ? formatMicroUsd(usage.spendMicroUsd) : "\u2014"}</dd></div>
+      <div><dt>REQUESTS</dt><dd>{computeState === "ready" ? usage.requests : "\u2014"}</dd></div>
+      <div><dt>MODELS USED</dt><dd>{computeState === "ready" ? usage.modelsUsed : "\u2014"}</dd></div>
+    </dl>
   </section>;
-  return <main className="compute-dashboard"><aside className="compute-sidebar"><Link className="compute-brand" href="/"><span className="mark"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><span>OPENWEIGHT</span></Link><div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div><nav aria-label="Workspace navigation"><a className="active" href="#overview" aria-current="page">{"\u25c9"} <span>Overview</span></a><Link href="/playground">{"\u25cc"} <span>Playground</span></Link><Link href="/settings">{"\u25c7"} <span>API Keys</span></Link><Link href="/gpu">{"\u25a3"} <span>GPU</span></Link></nav><div className="compute-sidebar-foot"><div><span className={`compute-dot ${sessionDegraded ? "muted" : ""}`} /> {sessionLabels[sessionState]}</div><small>{wallet ? `${wallet.slice(0, 6)}\u2026${wallet.slice(-4)}` : "Wallet not linked \u00b7 not required"}</small><button onClick={() => void signOut()}>Sign out \u2197</button></div></aside>
-    <section className="compute-main" id="overview"><header className="compute-header"><div><div className="compute-eyebrow">WORKSPACE / COMPUTE LAYER</div><h1>Compute, kept<br/><em>in view.</em></h1><p>Your allowance and a deliberate set of open-weight models, ready as soon as you sign in.</p></div><div className="compute-header-actions"><button onClick={() => void loadData(true)} disabled={checking || loadingWorkspace.current}>{checking ? "Loading\u2026" : "Refresh workspace \u21bb"}</button></div></header>
-      {registry}
-      {computeState === "idle" || computeState === "loading" ? <StatusPanel title="Loading workspace allowance" body="Fetching your current server ledger balance and recent compute activity." /> : computeState === "error" ? <StatusPanel title="Compute data is unavailable" body="The current server ledger balance and activity could not be loaded. No previous balance is presented." action={<button className="compute-retry" onClick={() => void loadData(true)}>Retry workspace \u21bb</button>} /> : <>
-        <section className="compute-support-row"><article className={`compute-balance-card ${!balanceAvailable ? "is-unavailable" : ""}`}><div className="compute-card-label">REMAINING COMPUTE ALLOWANCE</div><strong>{balanceMicroUsd === null ? "Unavailable" : formatMicroUsd(balanceMicroUsd)}</strong><p>{balanceMicroUsd === null ? "Current server ledger balance is unavailable" : balanceAvailable ? "Available internal USD compute \u00b7 actual cost" : "Zero / insufficient compute \u00b7 refresh the allowance to continue"}</p><div className="compute-balance-rule"><span /><small>{balanceMicroUsd === null ? "Refresh to request an authoritative balance" : balanceAvailable ? "Server ledger balance \u00b7 reservations reflected" : "Allowance is separate from authentication"}</small></div></article></section>
-        <section className="compute-section activity-section"><div className="compute-section-head"><div><div className="compute-card-label">RECENT USAGE</div><h2>Compute activity</h2></div><Link href="/settings">Manage API keys \u2197</Link></div>{activity.length === 0 ? <p className="compute-empty">No settled compute activity yet.</p> : <div className="compute-activity-list">{activity.slice(0, 4).map((item) => <div className="compute-activity-row" key={item.operation_key}><span className="activity-status"><i /></span><span><b>{item.model}</b><small>{relativeTime(item.created_at)} \u00b7 {item.input_tokens ?? "\u2014"} in / {item.output_tokens ?? "\u2014"} out</small></span><strong>{compactUsd(item.user_debit_micro_usd)}</strong></div>)}</div>}</section>
-      </>}
-      {notice && <p className="compute-notice" role="status">{notice}</p>}
-    </section>{selectedModel && <ModelDetails model={selectedModel} onClose={closeModelDetails} onUse={() => void openSelectedModel()} onCopied={setCopyNotice} />}{copyNotice && <div className="model-copy-feedback" role="status">{copyNotice}</div>}</main>;
+
+  const registry = <section className="compute-section models-primary">
+    <div className="compute-section-head"><div><div className="compute-card-label">MODELS</div><h2>Discover a model for the work.</h2>{!balanceAvailable && sessionState === "ready" && computeState === "ready" && <p className="compute-insufficient-note">Every model is available; the Playground also needs available compute.</p>}</div><Link className="compute-open-playground" href="/playground">Open Playground <span aria-hidden="true">\u2197</span></Link></div>
+    {modelsState === "loading" || modelsState === "idle" ? <StatusPanel title="Loading models" body="Fetching the current model catalog and provider availability. No cached availability is shown." /> : modelsState === "error" ? <div className="models-error" role="alert">Models could not be loaded. No previous availability data is shown.<br/><button onClick={() => void loadRegistry()}>Retry models \u21bb</button></div> : models.length === 0 ? <div className="models-error" role="alert">No models are available right now.<br/><button onClick={() => void loadRegistry()}>Retry models \u21bb</button></div> : <div className="compute-model-grid models-quad">{models.map((model) => <ModelCard key={model.id} model={model} onOpen={openModelDetails} />)}</div>}
+    <div className={`auto-model-row ${autoModel ? "is-on" : ""}`}>
+      <span className="auto-model-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4 3.5 8.5 12 13l8.5-4.5z" /><path d="M3.5 14.5 12 19l8.5-4.5" /></svg></span>
+      <div className="auto-model-copy"><h3>Auto model</h3><p>Let Openweight pick the right model for your task.</p></div>
+      <button type="button" className="auto-model-toggle" role="switch" aria-checked={autoModel} aria-label="Auto model selection" onClick={toggleAutoModel}><span /></button>
+    </div>
+  </section>;
+
+  return <WorkspaceShell
+    section="overview"
+    dashboardClassName="overview-dashboard"
+    mainId="overview"
+    asideFooter={<>
+      <div className="compute-sidebar-state"><span className={`compute-dot ${sessionDegraded ? "muted" : ""}`} /> {sessionLabels[sessionState]}</div>
+      <small className="compute-sidebar-note">{wallet ? `${wallet.slice(0, 6)}\u2026${wallet.slice(-4)}` : "Wallet not linked \u00b7 not required"}</small>
+      <button type="button" onClick={() => void signOut()}>Sign out \u2197</button>
+    </>}
+    overlays={<>{selectedModel && <ModelDetails model={selectedModel} onClose={closeModelDetails} onUse={() => void openSelectedModel()} onCopied={setCopyNotice} />}{copyNotice && <div className="model-copy-feedback" role="status">{copyNotice}</div>}</>}
+  >
+    <header className="compute-header">
+      <div className="compute-header-copy">
+        <div className="compute-eyebrow">WORKSPACE</div>
+        <h1>Compute, kept in view.</h1>
+        <p>Your allowance and a set of open-weight models, ready to use.</p>
+      </div>
+      <div className="compute-header-actions">
+        <button type="button" onClick={() => void loadData(true)} disabled={checking || loadingWorkspace.current}>{checking ? "Loading\u2026" : "Refresh \u21bb"}</button>
+      </div>
+    </header>
+    {computeState === "error" ? <StatusPanel title="Compute data is unavailable" body="The current server ledger balance and activity could not be loaded. No previous balance is presented." action={<button className="compute-retry" onClick={() => void loadData(true)}>Retry workspace \u21bb</button>} /> : allowance}
+    {registry}
+    <section className="compute-section activity-section">
+      <div className="compute-section-head"><div><div className="compute-card-label">RECENT ACTIVITY</div><h2>Compute activity</h2></div><Link className="compute-open-playground" href="/settings">Manage API keys \u2197</Link></div>
+      {computeState === "ready" && activity.length === 0 ? <p className="compute-empty">No settled compute activity yet.</p> : computeState === "ready" ? <div className="compute-activity-list">{activity.slice(0, 5).map((item) => <div className="compute-activity-row" key={item.operation_key}><span className="activity-status"><i /></span><span><b>{item.model}</b><small>{relativeTime(item.created_at)} \u00b7 {item.input_tokens ?? "\u2014"} in / {item.output_tokens ?? "\u2014"} out</small></span><strong>{compactUsd(item.user_debit_micro_usd)}</strong></div>)}</div> : <p className="compute-empty">Activity appears once compute data loads.</p>}
+    </section>
+    {notice && <p className="compute-notice" role="status">{notice}</p>}
+  </WorkspaceShell>;
 }

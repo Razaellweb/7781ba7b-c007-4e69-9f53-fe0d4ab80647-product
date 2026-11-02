@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Qwen logo">
+  <rect width="48" height="48" rx="10" fill="#ffffff" />
+  <path d="M24 8.5 38 16.5v15L24 39.5 10 31.5v-15z" fill="none" stroke="#5B5BE8" stroke-width="3.4" stroke-linejoin="round" />
+  <path d="M24 17.6 31.8 31.6H16.2z" fill="#5B5BE8" />
+</svg>

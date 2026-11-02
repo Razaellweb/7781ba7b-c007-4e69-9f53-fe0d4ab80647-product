@@ -22,6 +22,8 @@ export type ModelRow = {
   featured: boolean;
   sort_order: number;
   context_length: number | null;
+  description: string | null;
+  display_provider: string | null;
   markup_micro: string;
   min_charge_micro_usd: string;
   license_status: string;
@@ -53,7 +55,7 @@ function parseMetadata(value: unknown): ProviderMetadata | null {
 
 function modelSelect(): string {
   return `SELECT slug, display_name, family, provider, provider_model_slug, source_url,
-    status, visibility, featured, sort_order, context_length,
+    status, visibility, featured, sort_order, context_length, description, display_provider,
     markup_micro::text AS markup_micro, min_charge_micro_usd::text AS min_charge_micro_usd,
     license_status, provider_terms_status, provider_metadata, provider_sync_status, provider_synced_at, provider_sync_error
     FROM models`;
@@ -99,8 +101,23 @@ export async function listActiveModels(): Promise<ModelRow[]> {
   return selectModels("status = 'active' AND visibility = 'public'");
 }
 
+// One card per model identifier. A duplicate row (same slug rendered twice) is
+// collapsed to the first row in registry order so the dashboard never shows the
+// same model twice.
+export function dedupeBySlug(models: ModelRow[]): ModelRow[] {
+  const seen = new Set<string>();
+  const unique: ModelRow[] = [];
+  for (const model of models) {
+    const key = model.slug.trim().toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(model);
+  }
+  return unique;
+}
+
 export async function listDiscoverableModels(): Promise<ModelRow[]> {
-  return selectModels("status IN ('active','paused') AND visibility = 'public'");
+  return dedupeBySlug(await selectModels("status IN ('active','paused') AND visibility = 'public'"));
 }
 
 export async function getActiveModel(slug: string): Promise<ModelRow | null> {

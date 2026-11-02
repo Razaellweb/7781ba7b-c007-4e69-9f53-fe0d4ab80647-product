@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import Link from "next/link";
+import WorkspaceShell from "../../components/WorkspaceShell";
 import "../globals.css";
 import "../dashboard/dashboard.css";
 import "./api-keys.css";
@@ -157,69 +158,66 @@ export default function SettingsPage() {
     setMessage({ tone: "success", text: "One-time secret dismissed. It cannot be retrieved; use Rotate on this key to create a replacement." });
   };
 
-  if (!ready) return <main className="compute-dashboard"><div className="compute-status-panel"><div><h2>Checking your session</h2><p>Preparing secure API key access.</p></div></div></main>;
-  if (!authenticated) return <main className="compute-dashboard"><div className="compute-status-panel"><div><h2>Sign in to manage API keys</h2><p>First-party keys belong to your authenticated Openweight account.</p><Link className="key-link-button" href="/signup">Sign in</Link></div></div></main>;
+  const confirmDialog = pendingAction ? <div className="key-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPendingAction(null); }}><section className="key-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="key-confirm-title" aria-describedby="key-confirm-description"><div className="compute-card-label">CONFIRM KEY {pendingAction.type === "rotate" ? "ROTATION" : "REVOCATION"}</div><h2 id="key-confirm-title">{pendingAction.type === "rotate" ? "Replace this key?" : "Revoke this key?"}</h2><p id="key-confirm-description">{pendingAction.type === "rotate" ? <>A new secret will be issued for <strong>{pendingAction.key.name}</strong>, and this key will be revoked. The replacement secret is shown once.</> : <><strong>{pendingAction.key.name}</strong> will stop working immediately. This action cannot be undone.</>}</p><div className="key-confirm-actions"><button type="button" className="key-quiet-button" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction.type === "rotate" ? "key-primary-button" : "key-danger-button"} disabled={busy} onClick={() => void performAction()}>{busy ? "Working..." : pendingAction.type === "rotate" ? "Rotate key" : "Revoke key"}</button></div></section></div> : null;
+
+  if (!ready) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>Checking your session\u2026</p></div></main>;
+  if (!authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>Sign in to manage API keys.</p><Link className="key-link-button" href="/signup">Sign in</Link></div></main>;
 
   return (
-    <main className="compute-dashboard api-keys-dashboard">
-      <aside className="compute-sidebar">
-        <Link className="compute-brand key-brand" href="/"><span className="mark"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><span>OPENWEIGHT</span></Link>
-        <div className="compute-eyebrow">OPEN-WEIGHT FRONTIER</div>
-        <nav aria-label="Workspace navigation">
-          <Link href="/dashboard">Overview</Link>
-          <Link href="/playground">Playground</Link>
-          <Link className="active" href="/settings" aria-current="page">API Keys</Link>
-          <Link href="/gpu">GPU</Link>
-        </nav>
-        <div className="compute-sidebar-foot"><div>ACCOUNT / API ACCESS</div><small>First-party credentials</small></div>
-      </aside>
-      <section className="compute-main api-keys-main">
-        <header className="compute-header api-keys-header">
-          <div>
-            <div className="compute-eyebrow">WORKSPACE / DEVELOPER ACCESS</div>
-            <h1>Keys, kept<br/><em>in your control.</em></h1>
-            <p>Create credentials for your own integrations. Secrets are shown once at creation and are never included in the key list.</p>
-          </div>
-          <div className="compute-header-actions">
-            <span className="compute-access"><i /> PRIVATE TO YOUR ACCOUNT</span>
-            <button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? "Refreshing..." : "Refresh"}</button>
-          </div>
-        </header>
-        <section className="chat-api-guide" aria-labelledby="chat-api-guide-title">
-          <div className="chat-api-guide-heading">
-            <div className="compute-card-label">CHAT COMPLETIONS API</div>
-            <h2 id="chat-api-guide-title">Your key, your integration.</h2>
-            <div className="chat-api-base"><span>BASE URL</span><a href="https://openweight.systems" target="_blank" rel="noreferrer">https://openweight.systems</a></div>
-          </div>
-          <div className="chat-api-endpoint"><span className="chat-api-method">POST</span><code>/api/v1/chat/completions</code><span className="chat-api-auth">Bearer API key</span></div>
-          <div className="chat-api-details">
-            <pre className="chat-api-example"><code>{`{
+    <WorkspaceShell
+      section="api-keys"
+      dashboardClassName="api-keys-dashboard"
+      mainClassName="api-keys-main"
+      asideFooter={<>
+        <div className="compute-sidebar-state"><span className="compute-dot" /> ACCOUNT / API ACCESS</div>
+        <small className="compute-sidebar-note">First-party credentials</small>
+      </>}
+      overlays={confirmDialog}
+    >
+      <header className="compute-header api-keys-header">
+        <div>
+          <div className="compute-eyebrow">WORKSPACE / DEVELOPER ACCESS</div>
+          <h1>Keys, kept<br/><em>in your control.</em></h1>
+          <p>Create credentials for your own integrations. Secrets are shown once at creation and are never included in the key list.</p>
+        </div>
+        <div className="compute-header-actions">
+          <span className="compute-access"><i /> PRIVATE TO YOUR ACCOUNT</span>
+          <button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? "Refreshing..." : "Refresh"}</button>
+        </div>
+      </header>
+      <section className="chat-api-guide" aria-labelledby="chat-api-guide-title">
+        <div className="chat-api-guide-heading">
+          <div className="compute-card-label">CHAT COMPLETIONS API</div>
+          <h2 id="chat-api-guide-title">Your key, your integration.</h2>
+          <div className="chat-api-base"><span>BASE URL</span><a href="https://openweight.systems" target="_blank" rel="noreferrer">https://openweight.systems</a></div>
+        </div>
+        <div className="chat-api-endpoint"><span className="chat-api-method">POST</span><code>/api/v1/chat/completions</code><span className="chat-api-auth">Bearer API key</span></div>
+        <div className="chat-api-details">
+          <pre className="chat-api-example"><code>{`{
   "model": "auto",
   "messages": [{ "role": "user", "content": "Hello" }]
 }`}</code></pre>
-            <div className="chat-api-notes"><p>Send a JSON request with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a curated model ID.</span><span><strong>messages</strong> use system, user, or assistant roles with text content.</span><span><strong>stream</strong> may be set to <code>true</code> for streamed event responses.</span></div>
-          </div>
-        </section>
-        <div className="api-keys-layout">
-          <section className="key-panel create-key-panel">
-            <div className="compute-card-label">CREATE A KEY</div>
-            <h2>A credential for your integration.</h2>
-            <p className="key-panel-copy">Choose a recognizable name. Keys stay active until you revoke them.</p>
-            <form onSubmit={(event) => void create(event)}>
-              <label htmlFor="api-key-name">Key name</label>
-              <input id="api-key-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Production integration" required maxLength={80} disabled={busy} />
-              <button className="key-primary-button" type="submit" disabled={busy || !name.trim()}>{busy ? "Working..." : "Create API key"}</button>
-            </form>
-            {secret && <div className="one-time-secret" aria-live="polite"><div className="one-time-label">ONE-TIME SECRET</div><strong>Copy it now. This secret will only be shown once.</strong><p>If dismissed or lost, it cannot be retrieved. Rotate this key to obtain a replacement.</p><code>{secret}</code><div className="secret-actions"><button className="key-primary-button" type="button" onClick={() => void copySecret()}>Copy secret</button><button className="key-quiet-button" type="button" onClick={dismissSecret}>Dismiss</button></div></div>}
-          </section>
-          <section className="key-panel key-list-panel">
-            <div className="key-list-heading"><div><div className="compute-card-label">YOUR API KEYS</div><h2>Active and past credentials</h2></div><span className="key-count">{keys.filter((key) => !key.revoked_at).length} active</span></div>
-            {loading ? <div className="key-state" role="status"><span className="key-state-indicator" />Loading your keys...</div> : loadError && keys.length === 0 ? <div className="key-state key-state-error" role="alert"><strong>Keys could not be loaded</strong><p>{loadError}</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div> : keys.length === 0 ? <div className="key-state key-empty"><span className="key-empty-mark">*</span><strong>No API keys yet.</strong><p>Create a key when you are ready to connect your own integration. Your secret will be displayed only once.</p></div> : <div className="key-list">{loadError && <div className="key-state key-state-error" role="status"><strong>Could not refresh the key list</strong><p>{loadError} Your latest confirmed keys are still shown.</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div>}{keys.map((key) => <article className={`key-row ${key.revoked_at ? "is-revoked" : ""}`} key={key.id}><div className="key-row-main"><div className="key-row-title"><h3>{key.name}</h3><span className={`key-status ${key.revoked_at ? "revoked" : "active"}`}><i />{key.revoked_at ? "Revoked" : "Active"}</span></div><code className="key-prefix">{key.key_prefix}_.............</code><p>{key.scopes.join(" / ")} / {key.rate_limit_per_minute} requests per minute</p><small>Created {dateLabel(key.created_at)} / Last used {dateLabel(key.last_used_at)}</small></div>{!key.revoked_at && <div className="key-row-actions"><button className="key-quiet-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "rotate", key }); }}>Rotate</button><button className="key-danger-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "revoke", key }); }}>Revoke</button></div>}</article>)}</div>}
-          </section>
+          <div className="chat-api-notes"><p>Send a JSON request with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a curated model ID.</span><span><strong>messages</strong> use system, user, or assistant roles with text content.</span><span><strong>stream</strong> may be set to <code>true</code> for streamed event responses.</span></div>
         </div>
-        {message && <div className={`key-feedback ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div>}
       </section>
-      {pendingAction && <div className="key-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPendingAction(null); }}><section className="key-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="key-confirm-title" aria-describedby="key-confirm-description"><div className="compute-card-label">CONFIRM KEY {pendingAction.type === "rotate" ? "ROTATION" : "REVOCATION"}</div><h2 id="key-confirm-title">{pendingAction.type === "rotate" ? "Replace this key?" : "Revoke this key?"}</h2><p id="key-confirm-description">{pendingAction.type === "rotate" ? <>A new secret will be issued for <strong>{pendingAction.key.name}</strong>, and this key will be revoked. The replacement secret is shown once.</> : <><strong>{pendingAction.key.name}</strong> will stop working immediately. This action cannot be undone.</>}</p><div className="key-confirm-actions"><button type="button" className="key-quiet-button" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction.type === "rotate" ? "key-primary-button" : "key-danger-button"} disabled={busy} onClick={() => void performAction()}>{busy ? "Working..." : pendingAction.type === "rotate" ? "Rotate key" : "Revoke key"}</button></div></section></div>}
-    </main>
+      <div className="api-keys-layout">
+        <section className="key-panel create-key-panel">
+          <div className="compute-card-label">CREATE A KEY</div>
+          <h2>A credential for your integration.</h2>
+          <p className="key-panel-copy">Choose a recognizable name. Keys stay active until you revoke them.</p>
+          <form onSubmit={(event) => void create(event)}>
+            <label htmlFor="api-key-name">Key name</label>
+            <input id="api-key-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Production integration" required maxLength={80} disabled={busy} />
+            <button className="key-primary-button" type="submit" disabled={busy || !name.trim()}>{busy ? "Working..." : "Create API key"}</button>
+          </form>
+          {secret && <div className="one-time-secret" aria-live="polite"><div className="one-time-label">ONE-TIME SECRET</div><strong>Copy it now. This secret will only be shown once.</strong><p>If dismissed or lost, it cannot be retrieved. Rotate this key to obtain a replacement.</p><code>{secret}</code><div className="secret-actions"><button className="key-primary-button" type="button" onClick={() => void copySecret()}>Copy secret</button><button className="key-quiet-button" type="button" onClick={dismissSecret}>Dismiss</button></div></div>}
+        </section>
+        <section className="key-panel key-list-panel">
+          <div className="key-list-heading"><div><div className="compute-card-label">YOUR API KEYS</div><h2>Active and past credentials</h2></div><span className="key-count">{keys.filter((key) => !key.revoked_at).length} active</span></div>
+          {loading ? <div className="key-state" role="status"><span className="key-state-indicator" />Loading your keys...</div> : loadError && keys.length === 0 ? <div className="key-state key-state-error" role="alert"><strong>Keys could not be loaded</strong><p>{loadError}</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div> : keys.length === 0 ? <div className="key-state key-empty"><span className="key-empty-mark">*</span><strong>No API keys yet.</strong><p>Create a key when you are ready to connect your own integration. Your secret will be displayed only once.</p></div> : <div className="key-list">{loadError && <div className="key-state key-state-error" role="status"><strong>Could not refresh the key list</strong><p>{loadError} Your latest confirmed keys are still shown.</p><button className="key-quiet-button" type="button" onClick={() => void load()}>Try again</button></div>}{keys.map((key) => <article className={`key-row ${key.revoked_at ? "is-revoked" : ""}`} key={key.id}><div className="key-row-main"><div className="key-row-title"><h3>{key.name}</h3><span className={`key-status ${key.revoked_at ? "revoked" : "active"}`}><i />{key.revoked_at ? "Revoked" : "Active"}</span></div><code className="key-prefix">{key.key_prefix}_.............</code><p>{key.scopes.join(" / ")} / {key.rate_limit_per_minute} requests per minute</p><small>Created {dateLabel(key.created_at)} / Last used {dateLabel(key.last_used_at)}</small></div>{!key.revoked_at && <div className="key-row-actions"><button className="key-quiet-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "rotate", key }); }}>Rotate</button><button className="key-danger-button" type="button" disabled={busy} onClick={() => { setMessage(null); setPendingAction({ type: "revoke", key }); }}>Revoke</button></div>}</article>)}</div>}
+        </section>
+      </div>
+      {message && <div className={`key-feedback ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div>}
+    </WorkspaceShell>
   );
 }
