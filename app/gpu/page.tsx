@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useRouter } from "next/navigation";
+import { LaunchDialog, MachinesSection, type LaunchableOffer, type Rental, type RentalSettings } from "./machines";
 
 type GpuOffer = {
   id: number | string | null;
@@ -22,6 +23,7 @@ type GpuOffer = {
   cudaMaxGood: number | null;
   inetDownMbps: number | null;
   inetUpMbps: number | null;
+  directPortCount: number | null;
 };
 
 type OffersResponse = {
@@ -61,7 +63,9 @@ const FILTER_DEBOUNCE_MS = 400;
 const REQUEST_TIMEOUT_MS = 20_000;
 const SLOW_HINT_MS = 1_800;
 const REQUEST_LIMIT = "200";
-const LAUNCH_UNAVAILABLE_COPY = "Launch functionality is not yet available";
+const MACHINES_POLL_MS = 15_000;
+
+type MachinesState = { rentals: Rental[]; balanceUsd: number | null; settings: RentalSettings | null; unavailable: string | null };
 
 // VRAM presets in gigabytes. Empty means "any".
 const VRAM_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
@@ -202,42 +206,34 @@ const coerceOffer = (value: unknown): GpuOffer | null => {
     cudaMaxGood: numeric(candidate.cudaMaxGood),
     inetDownMbps: numeric(candidate.inetDownMbps),
     inetUpMbps: numeric(candidate.inetUpMbps),
+    directPortCount: numeric(candidate.directPortCount),
   };
 };
 
-/**
- * Deliberately inert stub: launching an instance is not implemented yet. The
- * button is permanently disabled and carries no handler, so clicking it can
- * never create an instance, call an API, or navigate anywhere. The tooltip lives
- * on the wrapper because disabled buttons do not receive hover events.
- */
-function LaunchControl() {
+/** Opens the launch dialog for this offer, or explains why it cannot launch. */
+function LaunchControl({ onLaunch, disabledReason }: { onLaunch: () => void; disabledReason: string | null }) {
   return (
     <div className="gpu-launch">
-      <span className="gpu-launch-tooltip" role="tooltip">
-        {LAUNCH_UNAVAILABLE_COPY}. Browsing stays available; nothing is rented from this page.
-      </span>
       <div className="gpu-launch-row">
         <button
           type="button"
-          className="gpu-pill gpu-launch-button"
-          disabled
-          aria-disabled="true"
-          title={LAUNCH_UNAVAILABLE_COPY}
-          aria-label={`Launch — ${LAUNCH_UNAVAILABLE_COPY.toLowerCase()}`}
+          className="gpu-pill is-warm gpu-launch-button"
+          onClick={onLaunch}
+          disabled={Boolean(disabledReason)}
+          title={disabledReason ?? undefined}
         >
           Launch
           <span className="gpu-launch-arrow" aria-hidden="true">↗</span>
         </button>
         <span className="gpu-launch-state">
-          <i aria-hidden="true" /> NOT AVAILABLE YET
+          <i aria-hidden="true" /> {disabledReason ? disabledReason.toUpperCase() : "BILLED PER MINUTE"}
         </span>
       </div>
     </div>
   );
 }
 
-function OfferCard({ offer }: { offer: GpuOffer }) {
+function OfferCard({ offer, onLaunch, launchDisabledReason }: { offer: GpuOffer; onLaunch: (offer: GpuOffer) => void; launchDisabledReason: string | null }) {
   const reliability = offer.reliability;
   const reliabilityWidth = reliability === null ? 0 : Math.max(2, Math.min(100, reliability * 100));
   const lowReliability = reliability !== null && reliability < 0.9;
@@ -278,7 +274,7 @@ function OfferCard({ offer }: { offer: GpuOffer }) {
         </span>
         <span className="gpu-offer-id">{offer.id === null ? "OFFER · —" : `OFFER · ${offer.id}`}</span>
       </div>
-      <LaunchControl />
+      <LaunchControl onLaunch={() => onLaunch(offer)} disabledReason={launchDisabledReason} />
     </article>
   );
 }
@@ -322,10 +318,10 @@ function RetryButton({ onRetry, busy, label = "Retry" }: { onRetry: () => void; 
 }
 
 /**
- * Browse-only GPU marketplace page. Offers are read from the authenticated
- * backend endpoint, which holds the provider credential server-side — the browser
- * never talks to the provider and never handles an API key. Nothing here rents an
- * instance: the Launch control on each card is a disabled stub.
+ * GPU marketplace page. Offers and machines come from authenticated backend
+ * endpoints, which hold the provider credential server-side — the browser never
+ * talks to the provider and never handles a provider key. Launching, billing and
+ * stopping all run on the server (lib/server/gpu-rentals.ts).
  */
 export default function GpuPage() {
   const { ready, authenticated, getAccessToken } = usePrivy();
@@ -346,6 +342,12 @@ export default function GpuPage() {
   const [slow, setSlow] = useState(false);
   // Bumped on Refresh/Retry so an unchanged query still refetches.
   const [attempt, setAttempt] = useState(0);
+
+  // Rented machines, balance, and launch settings.
+  const [machines, setMachines] = useState<MachinesState>({ rentals: [], balanceUsd: null, settings: null, unavailable: null });
+  const [launchTarget, setLaunchTarget] = useState<GpuOffer | null>(null);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [machineNotice, setMachineNotice] = useState<string | null>(null);
 
   const requestRef = useRef<AbortController | null>(null);
   const loadedOnceRef = useRef(false);
@@ -503,6 +505,58 @@ export default function GpuPage() {
     }
   }, [authHeaders]);
 
+  const loadMachines = useCallback(async () => {
+    try {
+      const headers = await authHeaders();
+      const response = await fetch("/api/gpu/instances", { headers, cache: "no-store" });
+      const data = (await response.json().catch(() => null)) as { rentals?: Rental[]; balanceUsd?: number; settings?: RentalSettings; error?: string } | null;
+      if (!mountedRef.current) return;
+      if (!response.ok || !data) {
+        setMachines((current) => ({ ...current, unavailable: data?.error ?? "GPU machines are temporarily unavailable." }));
+        return;
+      }
+      setMachines({ rentals: Array.isArray(data.rentals) ? data.rentals : [], balanceUsd: typeof data.balanceUsd === "number" ? data.balanceUsd : null, settings: data.settings ?? null, unavailable: null });
+    } catch {
+      if (mountedRef.current) setMachines((current) => ({ ...current, unavailable: current.settings ? null : "GPU machines are temporarily unavailable." }));
+    }
+  }, [authHeaders]);
+
+  const launch = useCallback(async (input: { template: string; model: string | null; sshPublicKey: string | null }): Promise<string | null> => {
+    if (!launchTarget) return "Choose a machine first.";
+    try {
+      const headers = await authHeaders();
+      const response = await fetch("/api/gpu/instances", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ offerId: launchTarget.id, ...input }),
+      });
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) return data?.error ?? "The machine could not be launched. Nothing was charged.";
+      setLaunchTarget(null);
+      setMachineNotice("Machine launched. It shows up below while it starts.");
+      await loadMachines();
+      document.getElementById("your-machines")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return null;
+    } catch {
+      return "The machine could not be launched. Check your connection and try again.";
+    }
+  }, [authHeaders, launchTarget, loadMachines]);
+
+  const stop = useCallback(async (rental: Rental) => {
+    setStopping(rental.id);
+    try {
+      const headers = await authHeaders();
+      const response = await fetch(`/api/gpu/instances/${rental.id}`, { method: "DELETE", headers });
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      setMachineNotice(response.ok ? "Machine stopped. Unused prepaid time was returned to your balance." : data?.error ?? "The machine could not be stopped. Try again.");
+      await loadMachines();
+    } catch {
+      setMachineNotice("The machine could not be stopped. Check your connection and try again.");
+    } finally {
+      if (mountedRef.current) setStopping(null);
+    }
+  }, [authHeaders, loadMachines]);
+
   // Unauthenticated visitors are sent through the Privy entry flow, exactly like
   // Overview and Playground.
   useEffect(() => {
@@ -515,6 +569,18 @@ export default function GpuPage() {
     if (!ready || !authenticated) return;
     void load(applied.query);
   }, [applied.query, attempt, ready, authenticated, load]);
+
+  // Machines load once, then refresh while any is starting or running.
+  const hasActiveMachine = machines.rentals.some((rental) => rental.status === "launching" || rental.status === "running");
+  useEffect(() => {
+    if (!ready || !authenticated) return;
+    void loadMachines();
+  }, [ready, authenticated, loadMachines]);
+  useEffect(() => {
+    if (!ready || !authenticated || !hasActiveMachine) return;
+    const timer = window.setInterval(() => void loadMachines(), MACHINES_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [ready, authenticated, hasActiveMachine, loadMachines]);
 
   const update = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -533,6 +599,15 @@ export default function GpuPage() {
   if (!ready || !authenticated) {
     return <main className="gpu-gate">{ready ? "Redirecting to sign in…" : "Restoring your session…"}</main>;
   }
+
+  const activeMachines = machines.rentals.filter((rental) => rental.status === "launching" || rental.status === "running").length;
+  const launchDisabledReason = machines.unavailable
+    ? "Not available yet"
+    : !machines.settings
+      ? "Loading"
+      : activeMachines >= machines.settings.maxActiveRentals
+        ? `Limit of ${machines.settings.maxActiveRentals} running`
+        : null;
 
   const loadingInitial = state === "loading";
   const hasResults = offers.length > 0;
@@ -557,13 +632,15 @@ export default function GpuPage() {
         <div className="gpu-heading-copy">
           <span className="gpu-kicker">WORKSPACE / COMPUTE LAYER</span>
           <h1>GPUs<span>.</span></h1>
-          <p className="gpu-subtitle">Live marketplace availability read through this workspace. Browsing is free — nothing is rented from this page.</p>
+          <p className="gpu-subtitle">Rent a GPU by the minute, paid from your compute balance. Pick a machine, choose a setup, and connect from your browser or terminal.</p>
         </div>
         <button className="gpu-pill gpu-refresh" type="button" onClick={refresh} disabled={pending}>
           {pending ? "Refreshing" : "Refresh"}
           <span aria-hidden="true">↻</span>
         </button>
       </header>
+
+      <MachinesSection rentals={machines.rentals} onStop={(rental) => void stop(rental)} stopping={stopping} notice={machineNotice} />
 
       <section className="gpu-controls" aria-label="Offer search and filters">
         <div className="gpu-search-row">
@@ -728,13 +805,23 @@ export default function GpuPage() {
         ) : (
           <div className="gpu-grid">
             {offers.map((offer, index) => (
-              <OfferCard offer={offer} key={`${offer.id ?? "offer"}-${index}`} />
+              <OfferCard offer={offer} key={`${offer.id ?? "offer"}-${index}`} onLaunch={setLaunchTarget} launchDisabledReason={offer.id === null ? "Unavailable" : launchDisabledReason} />
             ))}
           </div>
         )}
 
-        <p className="gpu-footnote">Offer data is read-only availability from the compute provider, served through this workspace. Launch is not available yet — prices are provider hourly rates and exclude any workspace allowance.</p>
+        <p className="gpu-footnote">Prices are hourly and include everything you are charged. Time comes out of your compute balance per minute; stopping a machine deletes its disk.{machines.unavailable ? ` ${machines.unavailable}` : ""}</p>
       </section>
+
+      {launchTarget && machines.settings && (
+        <LaunchDialog
+          offer={launchTarget as LaunchableOffer}
+          settings={machines.settings}
+          balanceUsd={machines.balanceUsd}
+          onClose={() => setLaunchTarget(null)}
+          onLaunch={launch}
+        />
+      )}
     </>
   );
 }

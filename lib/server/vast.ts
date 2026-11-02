@@ -19,8 +19,8 @@ import { vastConfig } from "./config";
 //   Authorization: Bearer <VAST_API_KEY>
 // The `q` value is an operator DSL (eq / neq / gt / lt / gte / lte / in / notin)
 // and the response is `{ "offers": [ … ] }` where each offer carries the fields
-// normalized below. This is a read-only "offers" (bundles) lookup: no ask is
-// created and no instance is rented, so the feature stays browse-only.
+// normalized below. Offer search is read-only; renting is the separate
+// instance section at the end of this module.
 //
 // Two wire details that are easy to get wrong (both checked against the live API):
 //   - `gpu_name` matches the display name exactly, with spaces ("RTX 4090").
@@ -44,7 +44,9 @@ export type VastFailureKind =
   | "timeout"
   | "transport"
   | "malformed"
-  | "upstream";
+  | "upstream"
+  /** The marketplace refused a rental request (for example the offer was taken). */
+  | "request_rejected";
 
 /** Sanitized failure surfaced to callers/UI. Carries no credential or upstream detail. */
 export class VastUnavailableError extends Error {
@@ -80,6 +82,8 @@ export type GpuOffer = {
   cudaMaxGood: number | null;
   inetDownMbps: number | null;
   inetUpMbps: number | null;
+  /** Ports the host can expose directly; each setup needs a few. */
+  directPortCount: number | null;
 };
 
 export type GpuOfferFilters = {
@@ -219,6 +223,7 @@ function normalizeOffer(value: unknown): GpuOffer | null {
     cudaMaxGood: safeNumber(raw.cuda_max_good),
     inetDownMbps: safeNumber(raw.inet_down),
     inetUpMbps: safeNumber(raw.inet_up),
+    directPortCount: safeInteger(raw.direct_port_count),
   };
 }
 
@@ -458,4 +463,215 @@ export async function searchGpuOffers(filters: GpuOfferFilters = {}): Promise<Gp
 export async function listGpuOffers(filters: GpuOfferFilters = {}): Promise<GpuOffer[]> {
   const result = await searchGpuOffers(filters);
   return result.offers;
+}
+
+// ---------------------------------------------------------------------------
+// Instances (rentals). Same credential boundary as offer search: the key only
+// travels as a Bearer header, and every failure becomes a sanitized
+// VastUnavailableError. Wire formats follow Vast.ai's official CLI:
+//   PUT    /api/v0/asks/{offer_id}/          rent an offer → { success, new_contract }
+//   GET    /api/v0/instances/{id}/?owner=me  → { instances: {...} | null }
+//   DELETE /api/v0/instances/{id}/           → { success }
+//   POST   /api/v0/instances/{id}/ssh/       { ssh_key }
+//   GET    /api/v1/instances/?select_filters=<json>  → { instances: [...] }
+// ---------------------------------------------------------------------------
+
+export type VastInstance = {
+  id: number;
+  /** running | loading | exited | created | null while the host schedules it. */
+  actualStatus: string | null;
+  intendedStatus: string | null;
+  publicIp: string | null;
+  /** Container port ("22/tcp") → public host port. */
+  ports: Record<string, number>;
+  jupyterToken: string | null;
+  hourlyPriceUsd: number | null;
+  label: string | null;
+};
+
+export type InstanceSpec = {
+  image: string;
+  /** Container env vars plus "-p <port>:<port>" port mappings, in Vast's env form. */
+  env: Record<string, string>;
+  onstart: string;
+  runtype: string;
+  diskGb: number;
+  label: string;
+  useJupyterLab: boolean;
+};
+
+function requireVast(): { apiKey: string; baseUrl: string } {
+  const config = vastConfig();
+  if (!config.enabled || !config.apiKey || !config.baseUrl) {
+    console.error(JSON.stringify({ event: "gpu_rental_credentials_missing" }));
+    throw new VastUnavailableError(false, "unconfigured");
+  }
+  return { apiKey: config.apiKey, baseUrl: config.baseUrl };
+}
+
+// One authenticated JSON request. Returns the HTTP status and parsed object
+// body. Transport, timeout, throttling and credential failures throw
+// sanitized errors; other non-2xx answers are returned for the caller to judge.
+async function vastRequest(path: string, init: { method: string; body?: unknown; event: string; absoluteUrl?: string }): Promise<{ status: number; body: Record<string, unknown> }> {
+  const config = requireVast();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response: Response;
+  let payload: unknown = null;
+  try {
+    try {
+      response = await fetch(init.absoluteUrl ?? `${config.baseUrl}${path}`, {
+        method: init.method,
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          Accept: "application/json",
+          ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const timedOut = controller.signal.aborted || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
+      console.error(JSON.stringify({ event: init.event, reason: timedOut ? "timeout" : "transport" }));
+      throw new VastUnavailableError(true, timedOut ? "timeout" : "transport");
+    }
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+  const body = objectValue(payload) ?? {};
+  if (isRateLimited(response.status, body)) {
+    console.error(JSON.stringify({ event: init.event, reason: "rate_limited", status: response.status }));
+    throw new VastUnavailableError(true, "rate_limited", retryAfterSeconds(response) ?? DEFAULT_RATE_LIMIT_RETRY_SECONDS);
+  }
+  if (isCredentialRejection(response.status, body)) {
+    console.error(JSON.stringify({ event: init.event, reason: "credentials_rejected", status: response.status }));
+    throw new VastUnavailableError(false, "credentials_rejected");
+  }
+  return { status: response.status, body };
+}
+
+function normalizeInstance(value: unknown): VastInstance | null {
+  const raw = objectValue(value);
+  if (!raw) return null;
+  const id = safeInteger(raw.id);
+  if (id === null) return null;
+  const ports: Record<string, number> = {};
+  const rawPorts = objectValue(raw.ports);
+  if (rawPorts) {
+    for (const [containerPort, bindings] of Object.entries(rawPorts)) {
+      const first = Array.isArray(bindings) ? objectValue(bindings[0]) : null;
+      const hostPort = first ? safeInteger(first.HostPort) : null;
+      if (hostPort !== null && /^\d{1,5}\/(tcp|udp)$/.test(containerPort)) ports[containerPort] = hostPort;
+    }
+  }
+  const ip = safeString(raw.public_ipaddr);
+  return {
+    id,
+    actualStatus: safeString(raw.actual_status),
+    intendedStatus: safeString(raw.intended_status),
+    publicIp: ip && /^[0-9a-fA-F:.]{3,45}$/.test(ip) ? ip : null,
+    ports,
+    jupyterToken: typeof raw.jupyter_token === "string" && /^[A-Za-z0-9_-]{8,200}$/.test(raw.jupyter_token) ? raw.jupyter_token : null,
+    hourlyPriceUsd: safeNumber(raw.dph_total),
+    label: safeString(raw.label),
+  };
+}
+
+/**
+ * Looks up one offer by id with the same verified/rentable constraints as the
+ * browse page. Returns null when it is no longer on the market. Used at launch
+ * so the price charged comes from the marketplace, never from the client.
+ */
+export async function getRentableOffer(offerId: number): Promise<GpuOffer | null> {
+  if (!Number.isSafeInteger(offerId) || offerId <= 0) return null;
+  const query = { id: { eq: offerId }, verified: { eq: true }, rentable: { eq: true }, limit: 1 };
+  const { status, body } = await vastRequest(`/bundles/?q=${encodeURIComponent(JSON.stringify(query))}`, { method: "GET", event: "gpu_offer_lookup_failed" });
+  if (status < 200 || status >= 300 || !Array.isArray(body.offers)) {
+    console.error(JSON.stringify({ event: "gpu_offer_lookup_failed", reason: "upstream_error", status }));
+    throw new VastUnavailableError(true, "upstream");
+  }
+  const offer = body.offers.map(normalizeOffer).find((candidate) => candidate !== null && String(candidate.id) === String(offerId));
+  return offer ?? null;
+}
+
+/** Rents an offer. Returns the new instance id. */
+export async function createInstance(offerId: number, spec: InstanceSpec): Promise<number> {
+  const { status, body } = await vastRequest(`/asks/${offerId}/`, {
+    method: "PUT",
+    event: "gpu_instance_create_failed",
+    body: {
+      client_id: "me",
+      image: spec.image,
+      env: spec.env,
+      disk: spec.diskGb,
+      label: spec.label,
+      onstart: spec.onstart,
+      runtype: spec.runtype,
+      use_jupyter_lab: spec.useJupyterLab,
+      python_utf8: true,
+      lang_utf8: true,
+      // Fail instead of queueing when the machine is no longer available.
+      cancel_unavail: true,
+    },
+  });
+  const instanceId = safeInteger(body.new_contract);
+  if (status >= 200 && status < 300 && body.success !== false && instanceId !== null) return instanceId;
+  const rejected = status >= 400 && status < 500;
+  console.error(JSON.stringify({ event: "gpu_instance_create_failed", reason: rejected ? "request_rejected" : "upstream_error", status }));
+  throw new VastUnavailableError(!rejected, rejected ? "request_rejected" : "upstream");
+}
+
+/** Current state of an instance, or null when it no longer exists. */
+export async function getInstance(instanceId: number): Promise<VastInstance | null> {
+  const { status, body } = await vastRequest(`/instances/${instanceId}/?owner=me`, { method: "GET", event: "gpu_instance_lookup_failed" });
+  if (status === 404) return null;
+  if (status < 200 || status >= 300) {
+    console.error(JSON.stringify({ event: "gpu_instance_lookup_failed", reason: "upstream_error", status }));
+    throw new VastUnavailableError(true, "upstream");
+  }
+  if (!("instances" in body)) {
+    console.error(JSON.stringify({ event: "gpu_instance_lookup_failed", reason: "malformed" }));
+    throw new VastUnavailableError(true, "malformed");
+  }
+  return normalizeInstance(body.instances);
+}
+
+/** Destroys an instance. An instance that is already gone counts as destroyed. */
+export async function destroyInstance(instanceId: number): Promise<void> {
+  const { status, body } = await vastRequest(`/instances/${instanceId}/`, { method: "DELETE", event: "gpu_instance_destroy_failed", body: {} });
+  if (status >= 200 && status < 300 && body.success !== false) return;
+  if (status === 404 || (await getInstance(instanceId)) === null) return;
+  console.error(JSON.stringify({ event: "gpu_instance_destroy_failed", reason: "upstream_error", status }));
+  throw new VastUnavailableError(true, "upstream");
+}
+
+/** Adds a public SSH key to a running instance. */
+export async function attachSshKey(instanceId: number, publicKey: string): Promise<void> {
+  const { status, body } = await vastRequest(`/instances/${instanceId}/ssh/`, { method: "POST", event: "gpu_instance_ssh_attach_failed", body: { ssh_key: publicKey } });
+  if (status >= 200 && status < 300 && body.success !== false) return;
+  console.error(JSON.stringify({ event: "gpu_instance_ssh_attach_failed", reason: "upstream_error", status }));
+  throw new VastUnavailableError(true, "upstream");
+}
+
+/**
+ * Finds the instance created with `label`, for launches whose create call
+ * timed out after the marketplace may already have created the machine.
+ */
+export async function findInstanceByLabel(label: string): Promise<VastInstance | null> {
+  const { baseUrl } = requireVast();
+  const filters = encodeURIComponent(JSON.stringify({ label: { eq: label } }));
+  const url = `${baseUrl.replace(/\/api\/v0$/, "")}/api/v1/instances/?select_filters=${filters}`;
+  const { status, body } = await vastRequest("", { method: "GET", event: "gpu_instance_label_lookup_failed", absoluteUrl: url });
+  if (status < 200 || status >= 300 || !Array.isArray(body.instances)) {
+    console.error(JSON.stringify({ event: "gpu_instance_label_lookup_failed", reason: "upstream_error", status }));
+    throw new VastUnavailableError(true, "upstream");
+  }
+  const match = body.instances.map(normalizeInstance).find((instance) => instance?.label === label);
+  return match ?? null;
 }

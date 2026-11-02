@@ -1,10 +1,11 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { authenticatePrivyRequest, AuthenticationError } from "../../../../lib/server/auth";
 import { searchGpuOffers, VastUnavailableError, GPU_OFFERS_UNAVAILABLE_MESSAGE } from "../../../../lib/server/vast";
 import { rateLimit } from "../../../../lib/server/redis";
 import { ensureMigrated } from "../../../../lib/server/migrate";
+import { providerHourlyUsdForUserPrice, sweepStaleRentals, userHourlyUsd } from "../../../../lib/server/gpu-rentals";
 
-// Browse-only GPU offers for the /gpu workspace page.
+// GPU offers for the /gpu workspace page.
 //
 // Access control: the existing Privy session only. A verified Privy identity is
 // sufficient to browse offers — there is no additional user authentication, no
@@ -19,7 +20,11 @@ import { ensureMigrated } from "../../../../lib/server/migrate";
 // renders as "GPU offers are temporarily unavailable".
 //
 // Read-only: this route maps to Vast.ai's documented offers lookup
-// (GET /api/v0/bundles/?q=…) and never creates an ask or rents an instance.
+// (GET /api/v0/bundles/?q=…). Renting happens in /api/gpu/instances.
+//
+// Prices: users only ever see the workspace price (provider price times
+// GPU_MARKUP_MULTIPLIER). Price filters arrive in workspace prices and are
+// converted back to provider prices for the upstream query.
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 const USER_RATE_LIMIT = 60;
@@ -104,17 +109,22 @@ export async function GET(request: Request) {
     const result = await searchGpuOffers({
       query: textParam(params.get("q")),
       gpuName: textParam(params.get("gpu")),
-      minPricePerHour: numericParam(params.get("minPricePerHour")),
-      maxPricePerHour: numericParam(params.get("maxPricePerHour")),
+      minPricePerHour: providerHourlyUsdForUserPrice(numericParam(params.get("minPricePerHour"))),
+      maxPricePerHour: providerHourlyUsdForUserPrice(numericParam(params.get("maxPricePerHour"))),
       minGpuRamGb: numericParam(params.get("minGpuRamGb")),
       maxGpuRamGb: numericParam(params.get("maxGpuRamGb")),
       minReliability: numericParam(params.get("minReliability")),
       limit: numericParam(params.get("limit")),
     });
 
+    after(() => sweepStaleRentals());
     return NextResponse.json(
       {
-        offers: result.offers,
+        offers: result.offers.map((offer) => ({
+          ...offer,
+          hourlyPriceUsd: userHourlyUsd(offer.hourlyPriceUsd),
+          storagePriceUsd: userHourlyUsd(offer.storagePriceUsd),
+        })),
         count: result.offers.length,
         total: result.total,
         gpuModels: result.gpuModels,

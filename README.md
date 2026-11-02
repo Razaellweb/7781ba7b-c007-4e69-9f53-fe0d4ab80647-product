@@ -52,6 +52,41 @@ API Keys, then redeploy. Until then the placeholder is treated exactly like a
 missing key (`kind: "unconfigured"`) and is never sent to Vast.ai.
 `VAST_API_BASE_URL` is optional and defaults to `https://console.vast.ai/api/v0`.
 
+### GPU rentals
+
+Users rent machines from `/gpu`. Machines are paid from the platform's Vast.ai
+credit and charged to the user's compute balance at the provider price times
+`GPU_MARKUP_MULTIPLIER`. Users only ever see the workspace price
+(`lib/server/gpu-rentals.ts`, `lib/server/gpu-templates.ts`).
+
+- **Billing:** time is prepaid in blocks from the compute balance. Each block is
+  a `compute_reservations` hold on channel `gpu`. The next block is reserved 10
+  minutes before the current one ends. If the balance can't cover it, the machine
+  is destroyed when the paid block ends. Stopping early charges per started
+  minute and returns the rest. A machine that never starts within 30 minutes is
+  destroyed and refunded.
+- **No scheduler needed:** each machine runs a small lease script that calls
+  `POST /api/gpu/instances/{id}/heartbeat` every minute, and each call advances
+  that rental's billing. If the app can't be reached, the script stops the
+  machine five minutes after its prepaid time ends. GPU requests also sweep
+  stale rentals, and a daily Vercel cron (`/api/gpu/sweep`, authorized by
+  `CRON_SECRET`) catches anything left.
+- **Setups:** only curated images run: a PyTorch JupyterLab notebook and a vLLM
+  OpenAI-compatible model server with a per-machine API key.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GPU_MARKUP_MULTIPLIER` | `1.15` | User price = provider price × this. |
+| `GPU_BILLING_BLOCK_MINUTES` | `60` | Length of each prepaid block (minimum 10). |
+| `GPU_MAX_HOURLY_USD` | `5` | Highest workspace price per hour a user can launch. |
+| `GPU_MAX_ACTIVE_RENTALS` | `2` | Machines one user can run at once. |
+| `GPU_DISK_GB` | `40` | Disk for each machine. |
+| `APP_BASE_URL` | Vercel production URL | Public origin machines send heartbeats to. |
+| `CRON_SECRET` | none | Authorizes the daily `/api/gpu/sweep` cron. |
+
+Integration tests for the billing engine run against a disposable Postgres:
+`TEST_DATABASE_URL=postgres://… npx vitest run tests/integration/gpu-rentals.test.ts`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

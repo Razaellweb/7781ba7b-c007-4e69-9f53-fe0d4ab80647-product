@@ -2,7 +2,7 @@ import { transaction } from "./db";
 import { allowanceConfig } from "./config";
 
 export type MicroUsd = bigint;
-export type AccountingChannel = "app" | "api_key";
+export type AccountingChannel = "app" | "api_key" | "gpu";
 export class AccountingError extends Error { readonly code: string; constructor(message: string, code = "ACCOUNTING_ERROR") { super(message); this.code = code; } }
 
 // Canonical monthly period boundaries in UTC. Grants are idempotent per period
