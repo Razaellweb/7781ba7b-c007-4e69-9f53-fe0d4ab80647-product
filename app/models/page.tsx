@@ -48,7 +48,7 @@ export default function ModelsPage() {
     return models.filter((model) => `${model.displayName} ${model.family ?? ""} ${creatorLabel(model)}`.toLowerCase().includes(term));
   }, [models, query]);
 
-  if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>{ready ? "Redirecting to sign in\u2026" : "Restoring your session\u2026"}</p></div></main>;
+  if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>{ready ? "Redirecting to sign in…" : "Restoring your session…"}</p></div></main>;
 
   return <WorkspaceShell section="models" dashboardClassName="models-dashboard">
     <header className="compute-header">
@@ -57,30 +57,30 @@ export default function ModelsPage() {
         <h1>Every model, in one place.</h1>
         <p>The available open-weight models, with live provider availability.</p>
       </div>
-      <div className="compute-header-actions"><button type="button" onClick={() => void load()} disabled={state === "loading"}>{state === "loading" ? "Loading\u2026" : "Refresh \u21bb"}</button></div>
+      <div className="compute-header-actions"><button type="button" onClick={() => void load()} disabled={state === "loading"}>{state === "loading" ? "Loading…" : "Refresh ↻"}</button></div>
     </header>
     <section className="compute-section models-primary">
       <div className="compute-section-head">
         <div><div className="compute-card-label">MODELS</div><h2>{filtered.length} {filtered.length === 1 ? "model" : "models"}</h2></div>
         <input className="models-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models or providers" aria-label="Search models" />
       </div>
-      {state === "loading" ? <div className="compute-status-panel"><span className="compute-status-mark">\u25cb</span><div><h2>Loading models</h2><p>Fetching current provider availability. No cached availability is shown.</p></div></div>
-        : state === "error" ? <div className="models-error" role="alert">Models could not be loaded.<br/><button onClick={() => void load()}>Retry models \u21bb</button></div>
+      {state === "loading" ? <div className="compute-status-panel"><span className="compute-status-mark">○</span><div><h2>Loading models</h2><p>Fetching current provider availability. No cached availability is shown.</p></div></div>
+        : state === "error" ? <div className="models-error" role="alert">Models could not be loaded.<br/><button onClick={() => void load()}>Retry models ↻</button></div>
         : filtered.length === 0 ? <div className="compute-empty" role="status">{models.length === 0 ? "No models are available right now." : "No models match that search."}</div>
         : <div className="compute-model-grid models-quad">{filtered.map((model) => {
           const isOperational = operational(model);
           const input = pricingValue(model.pricing, ["prompt", "input"]);
           const output = pricingValue(model.pricing, ["completion", "output"]);
-          const priceNote = input || output ? `${input ?? "\u2014"} in \u00b7 ${output ?? "\u2014"} out per 1M` : "Pricing unavailable";
+          const priceNote = input || output ? `${input ?? "—"} in · ${output ?? "—"} out per 1M` : "Pricing unavailable";
           const context = contextLabel(model.contextLength);
           return <article key={model.id} className={`compute-model-card ${isOperational ? "" : "is-gated"}`}>
             <div className="model-card-top"><span className="model-glyph"><ModelLogo model={model} /></span><span className={`model-status ${isOperational ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {statusLabel(model)}</span></div>
             <h3>{model.displayName}</h3>
             <p className="model-card-by">by {creatorLabel(model)}</p>
             <p className="model-card-summary">{model.description?.trim() || "Ready to use through your compute allowance."}</p>
-            <p className="model-card-by">{context ? `${context} context` : "Context window unavailable"} \u00b7 {priceNote}</p>
+            <p className="model-card-by">{context ? `${context} context` : "Context window unavailable"} · {priceNote}</p>
             {isOperational
-              ? <Link className="model-list-action" href={`/playground?model=${encodeURIComponent(model.id)}`}>Open in Playground <span aria-hidden="true">\u2192</span></Link>
+              ? <Link className="model-list-action" href={`/playground?model=${encodeURIComponent(model.id)}`}>Open in Playground <span aria-hidden="true">→</span></Link>
               : <span className="model-list-action is-disabled">Unavailable</span>}
           </article>;
         })}</div>}

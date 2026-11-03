@@ -18,8 +18,10 @@ type AccountResponse = { account: { walletAddress: string | null } };
 type AllowanceResponse = { balance?: { available?: string }; allowance?: { amount_micro_usd?: string; period_end?: string } | null };
 
 const clampMicroUsd = (micro: string | null | undefined) => { try { const value = BigInt(micro ?? "0"); return value > 0n ? value : 0n; } catch { return 0n; } };
-const formatMicroUsd = (micro: string | null | undefined) => { const value = clampMicroUsd(micro); const whole = value / 1_000_000n; const fraction = (value % 1_000_000n).toString().padStart(6, "0"); return `$${whole.toString()}.${fraction}`; };
-const compactUsd = (micro: string | null | undefined) => micro == null ? "\u2014" : formatMicroUsd(micro);
+// Cents for normal amounts ("$100.00"), rounded down so a balance is never
+// overstated; sub-cent amounts (a single request) keep micro-dollar precision.
+const formatMicroUsd = (micro: string | null | undefined) => { const value = clampMicroUsd(micro); if (value > 0n && value < 10_000n) return `$0.${value.toString().padStart(6, "0").replace(/0+$/, "")}`; const cents = value / 10_000n; return `$${(cents / 100n).toString()}.${(cents % 100n).toString().padStart(2, "0")}`; };
+const compactUsd = (micro: string | null | undefined) => micro == null ? "—" : formatMicroUsd(micro);
 const relativeTime = (iso: string) => { const timestamp = new Date(iso).getTime(); if (Number.isNaN(timestamp)) return ""; const minutes = Math.floor(Math.max(0, Date.now() - timestamp) / 60000); if (minutes < 1) return "Just now"; if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; };
 const unavailable = "Unavailable";
 const pricingValue = (pricing: Record<string, string> | null, keys: string[]) => { const key = keys.find((candidate) => pricing?.[candidate] != null); const numeric = key ? Number(pricing?.[key]) : NaN; return Number.isFinite(numeric) && numeric >= 0 ? `$${(numeric * 1_000_000).toFixed(2)} / 1M tokens` : null; };
@@ -53,11 +55,11 @@ function ModelCard({ model, onOpen }: { model: Model; onOpen: (model: Model, con
     <h3>{model.displayName}</h3>
     <p className="model-card-by">by {creatorLabel(model)}</p>
     <p className="model-card-summary">{cardSummary(model)}</p>
-    <span className="model-card-arrow" aria-hidden="true"><span>\u2192</span></span>
+    <span className="model-card-arrow" aria-hidden="true"><span>→</span></span>
   </button>;
 }
 
-function CopyButton({ value, label, onCopied }: { value: string; label: string; onCopied: (message: string) => void }) { const copy = async () => { try { if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable"); await navigator.clipboard.writeText(value); onCopied(`${label} copied`); } catch { onCopied("Copy unavailable \u2014 select the readable text to copy it."); } }; return <button type="button" className="model-copy-button" onClick={() => void copy()} aria-label={`Copy ${label}`}><span aria-hidden="true">\u25a3</span> Copy</button>; }
+function CopyButton({ value, label, onCopied }: { value: string; label: string; onCopied: (message: string) => void }) { const copy = async () => { try { if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable"); await navigator.clipboard.writeText(value); onCopied(`${label} copied`); } catch { onCopied("Copy unavailable — select the readable text to copy it."); } }; return <button type="button" className="model-copy-button" onClick={() => void copy()} aria-label={`Copy ${label}`}><span aria-hidden="true">▣</span> Copy</button>; }
 function DetailRow({ label, value }: { label: string; value: string }) { return <div className="model-detail-row"><span>{label}</span><b>{value}</b></div>; }
 function ModelDetails({ model, onClose, onUse, onCopied }: { model: Model; onClose: () => void; onUse: () => void; onCopied: (message: string) => void }) {
   const dialogRef = useRef<HTMLElement>(null);
@@ -87,15 +89,15 @@ function ModelDetails({ model, onClose, onUse, onCopied }: { model: Model; onClo
   const endpoint = "/api/v1/chat/completions";
   const quickstart = `curl https://openweight.systems${endpoint} \\\n  -H "Authorization: Bearer $OPENWEIGHT_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model.id}","messages":[{"role":"user","content":"Hello"}]}'`;
   return <div className="model-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} className="model-modal" role="dialog" aria-modal="true" aria-labelledby="model-details-title" aria-describedby="model-details-description" tabIndex={-1}>
-    <header className="model-modal-header"><div><div className="compute-card-label">MODEL \u00b7 {creatorLabel(model).toUpperCase()}</div><h2 id="model-details-title">{model.displayName}</h2><p id="model-details-description">{model.description?.trim() || (model.family ? `${model.family} family \u00b7 ` : "") + "Registry details and current operational state."}</p></div><button type="button" className="model-modal-close" onClick={onClose} aria-label="Close model details">\u00d7</button></header>
+    <header className="model-modal-header"><div><div className="compute-card-label">MODEL · {creatorLabel(model).toUpperCase()}</div><h2 id="model-details-title">{model.displayName}</h2><p id="model-details-description">{model.description?.trim() || (model.family ? `${model.family} family · ` : "") + "Registry details and current operational state."}</p></div><button type="button" className="model-modal-close" onClick={onClose} aria-label="Close model details">×</button></header>
     <div className="model-modal-body"><div className="model-detail-identity"><div><span className="model-detail-label">MODEL IDENTIFIER</span><code>{model.id}</code></div><CopyButton value={model.id} label="model identifier" onCopied={onCopied} /></div>
-      <div className="model-detail-identity"><div><span className="model-detail-label">PROVIDER IDENTIFIER \u00b7 SERVER ROUTING ONLY</span><code>{model.providerModelSlug || unavailable}</code></div>{model.providerModelSlug && <CopyButton value={model.providerModelSlug} label="provider model identifier" onCopied={onCopied} />}</div>
-      <div className="model-detail-status"><span className={`model-status ${operational(model) ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {status}</span><span className="model-detail-access">Registry \u00b7 {model.registryStatus}</span>{model.sourceUrl ? <a href={model.sourceUrl} target="_blank" rel="noreferrer">Model source \u2197</a> : <span className="model-detail-access">Model source \u00b7 {unavailable}</span>}</div>
+      <div className="model-detail-identity"><div><span className="model-detail-label">PROVIDER IDENTIFIER · SERVER ROUTING ONLY</span><code>{model.providerModelSlug || unavailable}</code></div>{model.providerModelSlug && <CopyButton value={model.providerModelSlug} label="provider model identifier" onCopied={onCopied} />}</div>
+      <div className="model-detail-status"><span className={`model-status ${operational(model) ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {status}</span><span className="model-detail-access">Registry · {model.registryStatus}</span>{model.sourceUrl ? <a href={model.sourceUrl} target="_blank" rel="noreferrer">Model source ↗</a> : <span className="model-detail-access">Model source · {unavailable}</span>}</div>
       <div className="model-detail-grid"><section className="model-detail-group"><h3>Provider pricing <small>per 1M tokens</small></h3>{input && <DetailRow label="Input" value={input} />}{cachedInput && <DetailRow label="Cached input" value={cachedInput} />}{output && <DetailRow label="Output" value={output} />}{!input && !cachedInput && !output && <DetailRow label="Pricing" value={unavailable} />}</section>
         {model.contextLength && model.contextLength > 0 && <section className="model-detail-group"><h3>Context window</h3><DetailRow label="Context window" value={`${model.contextLength.toLocaleString()} tokens`} /></section>}
-        <section className="model-detail-group"><h3>Capabilities</h3><DetailRow label="Input modalities" value={model.architecture?.inputModalities?.length ? model.architecture.inputModalities.join(" \u00b7 ") : unavailable} /><DetailRow label="Output modalities" value={model.architecture?.outputModalities?.length ? model.architecture.outputModalities.join(" \u00b7 ") : unavailable} /><DetailRow label="Supported parameters" value={model.supportedParameters?.length ? model.supportedParameters.join(" \u00b7 ") : unavailable} /></section></div>
-      <section className="model-quickstart" aria-labelledby="model-endpoint-heading"><h3 id="model-endpoint-heading">Openweight chat-completions API</h3><p>Supported first-party OpenAI-compatible endpoint. Authenticate with an Openweight API key and use the model identifier shown above.</p><div className="model-endpoint-row"><code>POST {endpoint}</code><CopyButton value={endpoint} label="chat-completions endpoint path" onCopied={onCopied} /></div><div className="model-code-heading"><span>QUICKSTART \u00b7 cURL</span><CopyButton value={quickstart} label="chat-completions example" onCopied={onCopied} /></div><pre className="model-code"><code>{quickstart}</code></pre></section>
-      <div className="model-modal-footer">{operational(model) ? <button type="button" className="model-use-button" onClick={onUse}>Try in Playground <span aria-hidden="true">\u2192</span></button> : <p className="model-modal-note">This model is {status.toLowerCase()}. It cannot be used in the Playground until provider availability is restored.</p>}</div>
+        <section className="model-detail-group"><h3>Capabilities</h3><DetailRow label="Input modalities" value={model.architecture?.inputModalities?.length ? model.architecture.inputModalities.join(" · ") : unavailable} /><DetailRow label="Output modalities" value={model.architecture?.outputModalities?.length ? model.architecture.outputModalities.join(" · ") : unavailable} /><DetailRow label="Supported parameters" value={model.supportedParameters?.length ? model.supportedParameters.join(" · ") : unavailable} /></section></div>
+      <section className="model-quickstart" aria-labelledby="model-endpoint-heading"><h3 id="model-endpoint-heading">Openweight chat-completions API</h3><p>Supported first-party OpenAI-compatible endpoint. Authenticate with an Openweight API key and use the model identifier shown above.</p><div className="model-endpoint-row"><code>POST {endpoint}</code><CopyButton value={endpoint} label="chat-completions endpoint path" onCopied={onCopied} /></div><div className="model-code-heading"><span>QUICKSTART · cURL</span><CopyButton value={quickstart} label="chat-completions example" onCopied={onCopied} /></div><pre className="model-code"><code>{quickstart}</code></pre></section>
+      <div className="model-modal-footer">{operational(model) ? <button type="button" className="model-use-button" onClick={onUse}>Try in Playground <span aria-hidden="true">→</span></button> : <p className="model-modal-note">This model is {status.toLowerCase()}. It cannot be used in the Playground until provider availability is restored.</p>}</div>
     </div></section></div>;
 }
 
@@ -209,7 +211,7 @@ export default function DashboardPage() {
 
   const usage = useMemo(() => summarizeUsage(activity), [activity]);
 
-  if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>{ready ? "Redirecting to sign in\u2026" : "Restoring your session\u2026"}</p></div></main>;
+  if (!ready || !authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>{ready ? "Redirecting to sign in…" : "Restoring your session…"}</p></div></main>;
   // Session states only. Identity is the access requirement, so nothing here can
   // represent an ownership or verification check.
   const sessionLabels: Record<SessionState, string> = { loading: "RESTORING SESSION", ready: "SIGNED IN", error: "RETRY WORKSPACE", unauthenticated: "AUTH REQUIRED" };
@@ -221,9 +223,9 @@ export default function DashboardPage() {
   const percentAvailable = totalMicro && totalMicro > 0n && availableMicro !== null
     ? Number((availableMicro * 1000n) / totalMicro) / 10
     : null;
-  const percentLabel = availableMicro === null ? "\u2014" : percentAvailable === null ? (balanceAvailable ? "\u2014" : "0% available") : `${Math.min(100, percentAvailable).toFixed(percentAvailable % 1 === 0 ? 0 : 1)}% available`;
+  const percentLabel = availableMicro === null ? "—" : percentAvailable === null ? (balanceAvailable ? "—" : "0% available") : `${Math.min(100, percentAvailable).toFixed(percentAvailable % 1 === 0 ? 0 : 1)}% available`;
   const progressWidth = percentAvailable === null ? (balanceAvailable ? 100 : 0) : Math.max(0, Math.min(100, percentAvailable));
-  const allowanceValue = availableMicro === null ? "\u2014" : formatMicroUsd(availableMicro.toString());
+  const allowanceValue = availableMicro === null ? "—" : formatMicroUsd(availableMicro.toString());
   const allowanceTotal = totalMicro === null ? null : formatMicroUsd(totalMicro.toString());
 
   const allowance = <section className="compute-allowance" aria-label="Compute allowance">
@@ -241,15 +243,15 @@ export default function DashboardPage() {
         </>}
     </div>
     <dl className="compute-stats">
-      <div><dt>USAGE (30D)</dt><dd>{computeState === "ready" ? formatMicroUsd(usage.spendMicroUsd) : "\u2014"}</dd></div>
-      <div><dt>REQUESTS</dt><dd>{computeState === "ready" ? usage.requests : "\u2014"}</dd></div>
-      <div><dt>MODELS USED</dt><dd>{computeState === "ready" ? usage.modelsUsed : "\u2014"}</dd></div>
+      <div><dt>USAGE (30D)</dt><dd>{computeState === "ready" ? formatMicroUsd(usage.spendMicroUsd) : "—"}</dd></div>
+      <div><dt>REQUESTS</dt><dd>{computeState === "ready" ? usage.requests : "—"}</dd></div>
+      <div><dt>MODELS USED</dt><dd>{computeState === "ready" ? usage.modelsUsed : "—"}</dd></div>
     </dl>
   </section>;
 
   const registry = <section className="compute-section models-primary">
-    <div className="compute-section-head"><div><div className="compute-card-label">MODELS</div><h2>Discover a model for the work.</h2>{!balanceAvailable && sessionState === "ready" && computeState === "ready" && <p className="compute-insufficient-note">Every model is available; the Playground also needs available compute.</p>}</div><Link className="compute-open-playground" href="/playground">Open Playground <span aria-hidden="true">\u2197</span></Link></div>
-    {modelsState === "loading" || modelsState === "idle" ? <StatusPanel title="Loading models" body="Fetching the current model catalog and provider availability. No cached availability is shown." /> : modelsState === "error" ? <div className="models-error" role="alert">Models could not be loaded. No previous availability data is shown.<br/><button onClick={() => void loadRegistry()}>Retry models \u21bb</button></div> : models.length === 0 ? <div className="models-error" role="alert">No models are available right now.<br/><button onClick={() => void loadRegistry()}>Retry models \u21bb</button></div> : <div className="compute-model-grid models-quad">{models.map((model) => <ModelCard key={model.id} model={model} onOpen={openModelDetails} />)}</div>}
+    <div className="compute-section-head"><div><div className="compute-card-label">MODELS</div><h2>Discover a model for the work.</h2>{!balanceAvailable && sessionState === "ready" && computeState === "ready" && <p className="compute-insufficient-note">Every model is available; the Playground also needs available compute.</p>}</div><Link className="compute-open-playground" href="/playground">Open Playground <span aria-hidden="true">↗</span></Link></div>
+    {modelsState === "loading" || modelsState === "idle" ? <StatusPanel title="Loading models" body="Fetching the current model catalog and provider availability. No cached availability is shown." /> : modelsState === "error" ? <div className="models-error" role="alert">Models could not be loaded. No previous availability data is shown.<br/><button onClick={() => void loadRegistry()}>Retry models ↻</button></div> : models.length === 0 ? <div className="models-error" role="alert">No models are available right now.<br/><button onClick={() => void loadRegistry()}>Retry models ↻</button></div> : <div className="compute-model-grid models-quad">{models.map((model) => <ModelCard key={model.id} model={model} onOpen={openModelDetails} />)}</div>}
     <div className={`auto-model-row ${autoModel ? "is-on" : ""}`}>
       <span className="auto-model-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4 3.5 8.5 12 13l8.5-4.5z" /><path d="M3.5 14.5 12 19l8.5-4.5" /></svg></span>
       <div className="auto-model-copy"><h3>Auto model</h3><p>Let Openweight pick the right model for your task.</p></div>
@@ -263,8 +265,8 @@ export default function DashboardPage() {
     mainId="overview"
     asideFooter={<>
       <div className="compute-sidebar-state"><span className={`compute-dot ${sessionDegraded ? "muted" : ""}`} /> {sessionLabels[sessionState]}</div>
-      <small className="compute-sidebar-note">{wallet ? `${wallet.slice(0, 6)}\u2026${wallet.slice(-4)}` : "Wallet not linked \u00b7 not required"}</small>
-      <button type="button" onClick={() => void signOut()}>Sign out \u2197</button>
+      <small className="compute-sidebar-note">{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "Wallet not linked · not required"}</small>
+      <button type="button" onClick={() => void signOut()}>Sign out ↗</button>
     </>}
     overlays={<>{selectedModel && <ModelDetails model={selectedModel} onClose={closeModelDetails} onUse={() => void openSelectedModel()} onCopied={setCopyNotice} />}{copyNotice && <div className="model-copy-feedback" role="status">{copyNotice}</div>}</>}
   >
@@ -275,14 +277,14 @@ export default function DashboardPage() {
         <p>Your allowance and a set of open-weight models, ready to use.</p>
       </div>
       <div className="compute-header-actions">
-        <button type="button" onClick={() => void loadData(true)} disabled={checking || loadingWorkspace.current}>{checking ? "Loading\u2026" : "Refresh \u21bb"}</button>
+        <button type="button" onClick={() => void loadData(true)} disabled={checking || loadingWorkspace.current}>{checking ? "Loading…" : "Refresh ↻"}</button>
       </div>
     </header>
-    {computeState === "error" ? <StatusPanel title="Compute data is unavailable" body="The current server ledger balance and activity could not be loaded. No previous balance is presented." action={<button className="compute-retry" onClick={() => void loadData(true)}>Retry workspace \u21bb</button>} /> : allowance}
+    {computeState === "error" ? <StatusPanel title="Compute data is unavailable" body="The current server ledger balance and activity could not be loaded. No previous balance is presented." action={<button className="compute-retry" onClick={() => void loadData(true)}>Retry workspace ↻</button>} /> : allowance}
     {registry}
     <section className="compute-section activity-section">
-      <div className="compute-section-head"><div><div className="compute-card-label">RECENT ACTIVITY</div><h2>Compute activity</h2></div><Link className="compute-open-playground" href="/settings">Manage API keys \u2197</Link></div>
-      {computeState === "ready" && activity.length === 0 ? <p className="compute-empty">No settled compute activity yet.</p> : computeState === "ready" ? <div className="compute-activity-list">{activity.slice(0, 5).map((item) => <div className="compute-activity-row" key={item.operation_key}><span className="activity-status"><i /></span><span><b>{item.model}</b><small>{relativeTime(item.created_at)} \u00b7 {item.input_tokens ?? "\u2014"} in / {item.output_tokens ?? "\u2014"} out</small></span><strong>{compactUsd(item.user_debit_micro_usd)}</strong></div>)}</div> : <p className="compute-empty">Activity appears once compute data loads.</p>}
+      <div className="compute-section-head"><div><div className="compute-card-label">RECENT ACTIVITY</div><h2>Compute activity</h2></div><Link className="compute-open-playground" href="/settings">Manage API keys ↗</Link></div>
+      {computeState === "ready" && activity.length === 0 ? <p className="compute-empty">No settled compute activity yet.</p> : computeState === "ready" ? <div className="compute-activity-list">{activity.slice(0, 5).map((item) => <div className="compute-activity-row" key={item.operation_key}><span className="activity-status"><i /></span><span><b>{item.model}</b><small>{relativeTime(item.created_at)} · {item.input_tokens ?? "—"} in / {item.output_tokens ?? "—"} out</small></span><strong>{compactUsd(item.user_debit_micro_usd)}</strong></div>)}</div> : <p className="compute-empty">Activity appears once compute data loads.</p>}
     </section>
     {notice && <p className="compute-notice" role="status">{notice}</p>}
   </WorkspaceShell>;

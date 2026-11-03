@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// Model marks are bundled locally under /assets/models so the cards never depend
-// on a third-party CDN or a temporary hotlinked URL.
+// Model marks are the logo files the user supplied, bundled locally under
+// /assets/models so the cards never depend on a third-party CDN or a hotlinked URL.
 type BrandLogo = { src: string; alt: string; monogram: string };
 
 type LogoModel = {
@@ -15,10 +15,10 @@ type LogoModel = {
   providerModelSlug?: string | null;
 };
 
-const zLogo: BrandLogo = { src: "/assets/models/glm.svg", alt: "GLM logo", monogram: "Z" };
-const deepseekLogo: BrandLogo = { src: "/assets/models/deepseek.svg", alt: "DeepSeek logo", monogram: "D" };
-const qwenLogo: BrandLogo = { src: "/assets/models/qwen.svg", alt: "Qwen logo", monogram: "Q" };
-const kimiLogo: BrandLogo = { src: "/assets/models/kimi.svg", alt: "Kimi logo", monogram: "K" };
+const zLogo: BrandLogo = { src: "/assets/models/glm.png", alt: "GLM logo", monogram: "Z" };
+const deepseekLogo: BrandLogo = { src: "/assets/models/deepseek.png", alt: "DeepSeek logo", monogram: "D" };
+const qwenLogo: BrandLogo = { src: "/assets/models/qwen.png", alt: "Qwen logo", monogram: "Q" };
+const kimiLogo: BrandLogo = { src: "/assets/models/kimi.png", alt: "Kimi logo", monogram: "K" };
 
 // Identifier matches run first so a model can never receive another vendor's
 // mark, even when display copy overlaps between families.

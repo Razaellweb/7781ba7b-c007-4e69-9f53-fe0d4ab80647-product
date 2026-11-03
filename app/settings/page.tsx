@@ -160,7 +160,7 @@ export default function SettingsPage() {
 
   const confirmDialog = pendingAction ? <div className="key-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setPendingAction(null); }}><section className="key-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="key-confirm-title" aria-describedby="key-confirm-description"><div className="compute-card-label">CONFIRM KEY {pendingAction.type === "rotate" ? "ROTATION" : "REVOCATION"}</div><h2 id="key-confirm-title">{pendingAction.type === "rotate" ? "Replace this key?" : "Revoke this key?"}</h2><p id="key-confirm-description">{pendingAction.type === "rotate" ? <>A new secret will be issued for <strong>{pendingAction.key.name}</strong>, and this key will be revoked. The replacement secret is shown once.</> : <><strong>{pendingAction.key.name}</strong> will stop working immediately. This action cannot be undone.</>}</p><div className="key-confirm-actions"><button type="button" className="key-quiet-button" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction.type === "rotate" ? "key-primary-button" : "key-danger-button"} disabled={busy} onClick={() => void performAction()}>{busy ? "Working..." : pendingAction.type === "rotate" ? "Rotate key" : "Revoke key"}</button></div></section></div> : null;
 
-  if (!ready) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>Checking your session\u2026</p></div></main>;
+  if (!ready) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>Checking your session…</p></div></main>;
   if (!authenticated) return <main className="dashboard-gate"><div className="gate-inner"><span className="mark large"><img src="/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png" alt="favicon" /></span><p>Sign in to manage API keys.</p><Link className="key-link-button" href="/signup">Sign in</Link></div></main>;
 
   return (
@@ -197,7 +197,7 @@ export default function SettingsPage() {
   "model": "auto",
   "messages": [{ "role": "user", "content": "Hello" }]
 }`}</code></pre>
-          <div className="chat-api-notes"><p>Send a JSON request with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a curated model ID.</span><span><strong>messages</strong> use system, user, or assistant roles with text content.</span><span><strong>stream</strong> may be set to <code>true</code> for streamed event responses.</span></div>
+          <div className="chat-api-notes"><p>Send a JSON request with <code>Authorization: Bearer &lt;your key&gt;</code>.</p><span><strong>model</strong> accepts <code>auto</code> or a model ID.</span><span><strong>messages</strong> use system, user, or assistant roles with text content.</span><span><strong>stream</strong> may be set to <code>true</code> for streamed event responses.</span></div>
         </div>
       </section>
       <div className="api-keys-layout">

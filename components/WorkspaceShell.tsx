@@ -55,7 +55,7 @@ function DefaultAsideFooter() {
       <div className="compute-sidebar-state">
         <span className="compute-dot" /> WORKSPACE
       </div>
-      <small className="compute-sidebar-note">Curated model access</small>
+      <small className="compute-sidebar-note">Open-weight model access</small>
     </>
   );
 }
