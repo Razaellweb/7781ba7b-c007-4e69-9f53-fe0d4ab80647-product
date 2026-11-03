@@ -12,10 +12,29 @@ import { ensureMigrated } from "../../../lib/server/migrate";
 // it never determines access. Historical ownership-verified rows remain in the
 // table untouched and readable, and a missing or legacy non-eligible state can
 // never disable models, chat, or inference.
+//
+// `?wallet=` is an optional CANONICAL-WALLET PREFERENCE supplied by the workspace
+// when it needs the backend to confirm a specific wallet (the Overview Fund flow).
+// It is never trusted on its own: authenticatePrivyRequest still verifies the Privy
+// access token and only honours the preference when that address is actually linked
+// to the verified user, so a caller cannot have an arbitrary address recorded.
+// When no preference is supplied (or it is not linked) the canonical wallet falls
+// back to the existing Privy ordering rule.
+const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
+
+function preferredWallet(request: Request): string | null {
+  try {
+    const value = new URL(request.url).searchParams.get("wallet");
+    return value && EVM_ADDRESS.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: Request) {
   try {
     await ensureMigrated();
-    const account = await authenticatePrivyRequest(request.headers.get("authorization"));
+    const account = await authenticatePrivyRequest(request.headers.get("authorization"), preferredWallet(request));
     await provisionDefaultAllowance(account);
     const access = await resolveIdentityAccess(account);
     const history = await query<{ state: string; chain_id: number | null; wallet_address: string | null; balance_raw: string | null; threshold_raw: string | null; token_decimals: number | null; verified_at: string }>(

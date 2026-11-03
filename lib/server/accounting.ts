@@ -14,23 +14,33 @@ export function currentAllowancePeriod(): { start: Date; end: Date } {
   return { start, end };
 }
 
-export async function issueGrant(accountId: string, periodStart: Date, periodEnd: Date) {
+export type GrantRow = { id: string; account_id: string; amount_micro_usd: string; period_start: Date; period_end: Date; recurrence_key: string };
+
+export async function issueGrant(accountId: string, periodStart: Date, periodEnd: Date): Promise<GrantRow | null> {
   const c = allowanceConfig();
+  // The configured amount defaults to ZERO and there is no placeholder credit.
+  // A zero amount therefore issues nothing at all: compute_grants and
+  // compute_ledger_entries both require a positive amount, and writing a
+  // synthetic grant here is exactly what produced a fake balance before.
+  // Credits only ever come from real ledger entries (a credited funding
+  // deposit), so an unfunded account correctly reads a balance of $0.00.
+  if (c.amountMicroUsd <= 0n) return null;
   return transaction(async db => {
     // Grants are issued to any authenticated, Privy-verified account. Ownership
     // is no longer a precondition, so no holder_eligibility lookup happens here.
     const grant = await db.query(`INSERT INTO compute_grants (account_id, amount_micro_usd, period_start, period_end, recurrence_key) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (account_id, recurrence_key) DO NOTHING RETURNING *`, [accountId, c.amountMicroUsd.toString(), periodStart, periodEnd, `${c.recurrence}:${periodStart.toISOString()}`]);
-    if (!grant.rowCount) return (await db.query(`SELECT * FROM compute_grants WHERE account_id=$1 AND recurrence_key=$2`, [accountId, `${c.recurrence}:${periodStart.toISOString()}`])).rows[0];
+    if (!grant.rowCount) return (await db.query(`SELECT * FROM compute_grants WHERE account_id=$1 AND recurrence_key=$2`, [accountId, `${c.recurrence}:${periodStart.toISOString()}`])).rows[0] ?? null;
     await db.query(`INSERT INTO compute_ledger_entries (account_id, grant_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'grant',$3,$4,$5)`, [accountId, grant.rows[0].id, c.amountMicroUsd.toString(), `grant:${grant.rows[0].id}`, JSON.stringify({ periodStart, periodEnd })]);
     return grant.rows[0];
   });
 }
 
-// Ensures the authenticated account holds the configured default allowance for
-// the current period. The allowance is a separately handled mechanism: it never
-// consults chain state, token balances, or legacy holder-status rows, and it
-// never invents a new amount (it reuses allowanceConfig()).
-export async function ensureDefaultAllowance(accountId: string) {
+// Ensures the authenticated account holds the configured allowance for the current
+// period. The allowance is a separately handled mechanism: it never consults chain
+// state, token balances, or legacy holder-status rows, and it never invents an
+// amount. With the default configuration (zero) this is a no-op, so simply opening
+// the workspace, resolving a wallet, or signing in can never credit a balance.
+export async function ensureDefaultAllowance(accountId: string): Promise<GrantRow | null> {
   const { start, end } = currentAllowancePeriod();
   return issueGrant(accountId, start, end);
 }
@@ -42,14 +52,15 @@ export async function reserveCompute(accountId: string, operationKey: string, es
     const existing = await db.query(`SELECT * FROM compute_reservations WHERE account_id=$1 AND operation_key=$2`, [accountId, operationKey]);
     if (existing.rowCount) return existing.rows[0];
     await db.query(`SELECT id FROM user_accounts WHERE id=$1 FOR UPDATE`, [accountId]);
-    const grantState = await db.query<{ active_count: string; expired_count: string }>(`SELECT count(*) FILTER (WHERE period_end > now())::text active_count, count(*) FILTER (WHERE period_end <= now())::text expired_count FROM compute_grants WHERE account_id=$1`, [accountId]);
-    // An account with no grant can still spend funded compute: deposits credited
-    // from a funding wallet are ledger entries of their own and do not require a
-    // monthly grant to exist. Only reject when the account has neither.
-    const fundedBalance = BigInt((await db.query<{ available: string }>(`SELECT GREATEST(COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund','deposit','adjustment') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`, [accountId])).rows[0]?.available ?? "0");
-    if (grantState.rows[0].active_count === "0" && fundedBalance <= 0n) throw new AccountingError(grantState.rows[0].expired_count === "0" ? "No active compute allowance is available" : "Your compute allowance has expired; refresh allowance to renew it", grantState.rows[0].expired_count === "0" ? "ALLOWANCE_MISSING" : "ALLOWANCE_EXPIRED");
-    const balance = await db.query<{ available: string }>(`SELECT COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund','deposit','adjustment') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`, [accountId]);
-    if (BigInt(balance.rows[0].available) < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
+    // A grant only contributes while it is inside its period; every other credit
+    // (a released hold, a refund, a credited funding deposit, an operator
+    // adjustment) is usable as soon as it is recorded. Deposits are the only value
+    // source that can fund an account, so an unfunded account has no balance to
+    // spend from and is rejected here rather than being extended a placeholder.
+    const balance = await db.query<{ available: string }>(`SELECT GREATEST(COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund','deposit','adjustment') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`, [accountId]);
+    const available = BigInt(balance.rows[0]?.available ?? "0");
+    if (available <= 0n) throw new AccountingError("No compute balance is available. Fund the wallet to add compute", "ALLOWANCE_MISSING");
+    if (available < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
     const reservation = await db.query(`INSERT INTO compute_reservations (account_id, operation_key, reserved_micro_usd, status, api_key_id, channel) VALUES ($1,$2,$3,'reserved',$4,$5) RETURNING *`, [accountId, operationKey, estimate.toString(), options.apiKeyId ?? null, channel]);
     await db.query(`INSERT INTO compute_ledger_entries (account_id, reservation_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'reservation',$3,$4,$5)`, [accountId, reservation.rows[0].id, estimate.toString(), `reserve:${operationKey}`, JSON.stringify({ channel, apiKeyId: options.apiKeyId ?? null })]);
     return reservation.rows[0];
