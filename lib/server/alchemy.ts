@@ -3,7 +3,7 @@ import { alchemyConfig } from "./config";
 
 // Alchemy is the ONLY chain-monitoring provider in this funding flow.
 //
-// Two responsibilities live here and nowhere else:
+// Three responsibilities live here and nowhere else:
 //   1. Notifications. A funding address is registered on an Alchemy Address
 //      Activity webhook, so Alchemy pushes every transfer that touches it. Each
 //      delivery is authenticated with the webhook's signing key
@@ -11,7 +11,11 @@ import { alchemyConfig } from "./config";
 //      the signature mechanism Alchemy supports for webhooks.
 //   2. Confirmation counting. Confirmations are read back from Alchemy's HTTP RPC
 //      (`eth_getTransactionReceipt` against `eth_blockNumber`), so a deposit is only
-//      credited once it actually has the configured depth on chain.
+//      credited once it actually has the configured depth on chain. The receipt's
+//      block hash is returned too, which is what makes reorg detection possible.
+//   3. Polling fallback. `eth_getLogs` filtered to the configured USDG contract and
+//      the watched deposit address reconstructs the same transfers when webhook
+//      deliveries are missed, so reconciliation never depends on a single channel.
 //
 // Credentials are read from the server environment and never leave this process.
 
@@ -22,6 +26,9 @@ export class AlchemyError extends Error {
 
 const NOTIFY_API = "https://dashboard.alchemy.com/api";
 
+/** keccak256("Transfer(address,address,uint256)"). */
+export const ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
 /** True when an Alchemy RPC endpoint is configured (notifications optional). */
 export function alchemyMonitoringEnabled(): boolean {
   return alchemyConfig().enabled;
@@ -31,6 +38,12 @@ export function alchemyMonitoringEnabled(): boolean {
 export function alchemyWebhooksEnabled(): boolean {
   const cfg = alchemyConfig();
   return cfg.webhookConfigured && Boolean(cfg.rpcUrl);
+}
+
+/** True when deposit addresses can actually be registered on a Notify webhook. */
+export function alchemyRegistrationEnabled(): boolean {
+  const cfg = alchemyConfig();
+  return cfg.addressRegistrationConfigured && Boolean(cfg.network);
 }
 
 /**
@@ -49,6 +62,11 @@ export function verifyAlchemySignature(rawBody: string, signature: string | null
   try { provided = Buffer.from(signature, "hex"); } catch { return false; }
   if (provided.length !== expected.length) return false;
   return timingSafeEqual(provided, expected);
+}
+
+/** Computes the signature Alchemy would send for a body (used by the tests). */
+export function signAlchemyBody(rawBody: string, signingKey: string): string {
+  return createHmac("sha256", signingKey).update(rawBody, "utf8").digest("hex");
 }
 
 /**
@@ -86,16 +104,34 @@ export async function getBlockNumber(): Promise<bigint> {
   return BigInt(hex);
 }
 
+export type TransactionReceiptInfo = {
+  blockNumber: number;
+  /** Lower-cased inclusion block hash, used to detect a reorg of a credited tx. */
+  blockHash: string;
+  status: string | null;
+};
+
+/** Full receipt identity for a transaction, or null while it is not mined. */
+export async function getTransactionReceiptInfo(txHash: string): Promise<TransactionReceiptInfo | null> {
+  const receipt = await rpc<{ blockNumber?: string; blockHash?: string; status?: string } | null>("eth_getTransactionReceipt", [txHash]);
+  if (!receipt?.blockNumber || !receipt.blockHash) return null;
+  return {
+    blockNumber: Number(BigInt(receipt.blockNumber)),
+    blockHash: receipt.blockHash.toLowerCase(),
+    status: typeof receipt.status === "string" ? receipt.status.toLowerCase() : null,
+  };
+}
+
 /**
  * Confirmations for a transfer, measured the way the brief specifies: the
  * transaction's inclusion block plus each block mined after it. A transfer whose
  * transaction is not in a block yet has zero confirmations.
  */
 export async function getTransactionConfirmations(txHash: string): Promise<number> {
-  const receipt = await rpc<{ blockNumber?: string } | null>("eth_getTransactionReceipt", [txHash]);
-  if (!receipt?.blockNumber) return 0;
-  const included = BigInt(receipt.blockNumber);
+  const identity = await getTransactionReceiptInfo(txHash);
+  if (!identity) return 0;
   const head = await getBlockNumber();
+  const included = BigInt(identity.blockNumber);
   if (head < included) return 0;
   return Number(head - included) + 1;
 }
@@ -167,21 +203,126 @@ export function parseAddressActivity(payload: unknown): AlchemyAddressActivity[]
   return parsed;
 }
 
+/** A single ERC-20 Transfer log, in the same shape as an address activity. */
+export type TokenTransferLog = {
+  txHash: string;
+  logIndex: number;
+  tokenAddress: string;
+  fromAddress: string | null;
+  toAddress: string | null;
+  rawAmount: string | null;
+  blockNumber: number;
+};
+
+function topicAddress(topic: string | undefined): string | null {
+  if (!topic || !/^0x[0-9a-fA-F]{64}$/.test(topic)) return null;
+  const body = topic.slice(2).slice(-40);
+  if (!/^[0-9a-fA-F]{40}$/.test(body)) return null;
+  if (/^0+$/.test(body)) return null;
+  return `0x${body.toLowerCase()}`;
+}
+
+function addressTopic(address: string): string {
+  return `0x${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+}
+
+function blockTag(value: bigint): string {
+  return `0x${value.toString(16)}`;
+}
+
+/**
+ * Polling fallback: reads ERC-20 Transfer logs for the configured USDG contract
+ * addressed to one watched deposit address. Filtering happens in the RPC call
+ * itself (contract address + indexed `to` topic), so the payload can only ever
+ * contain transfers of the configured token to the watched address.
+ */
+export async function fetchIncomingTokenLogs(params: {
+  tokenAddress: string;
+  toAddress: string;
+  fromBlock: bigint;
+  toBlock: bigint;
+}): Promise<TokenTransferLog[]> {
+  const cfg = alchemyConfig();
+  if (!cfg.rpcUrl || !cfg.network) throw new AlchemyError("Alchemy RPC is not configured", "ALCHEMY_UNCONFIGURED");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(params.tokenAddress)) throw new AlchemyError("Invalid token address for log scan", "ALCHEMY_INVALID_FILTER");
+  const to = BigInt(params.toBlock);
+  let from = BigInt(params.fromBlock);
+  if (from < 0n) from = 0n;
+  if (to < from) return [];
+
+  const logs = await rpc<Array<{ address?: string; topics?: string[]; data?: string; transactionHash?: string; logIndex?: string; blockNumber?: string; removed?: boolean }>>(
+    "eth_getLogs",
+    [{
+      fromBlock: blockTag(from),
+      toBlock: blockTag(to),
+      address: params.tokenAddress.toLowerCase(),
+      topics: [ERC20_TRANSFER_TOPIC, null, addressTopic(params.toAddress)],
+    }]
+  );
+  if (!Array.isArray(logs)) return [];
+
+  const transfers: TokenTransferLog[] = [];
+  for (const log of logs) {
+    if (!log || log.removed) continue;
+    const txHash = typeof log.transactionHash === "string" ? log.transactionHash.toLowerCase() : null;
+    const tokenAddress = typeof log.address === "string" && /^0x[0-9a-fA-F]{40}$/.test(log.address) ? log.address.toLowerCase() : null;
+    if (!txHash || !tokenAddress) continue;
+    const topics = Array.isArray(log.topics) ? log.topics : [];
+    if (topics.length < 3 || (topics[0] ?? "").toLowerCase() !== ERC20_TRANSFER_TOPIC) continue;
+    const rawAmount = hexToDecimalString(typeof log.data === "string" ? log.data : null);
+    const logIndexRaw = typeof log.logIndex === "string" ? Number(BigInt(log.logIndex)) : Number.NaN;
+    transfers.push({
+      txHash,
+      logIndex: Number.isFinite(logIndexRaw) ? logIndexRaw : 0,
+      tokenAddress,
+      fromAddress: topicAddress(topics[1]),
+      toAddress: topicAddress(topics[2]),
+      rawAmount,
+      blockNumber: typeof log.blockNumber === "string" ? Number(BigInt(log.blockNumber)) : 0,
+    });
+  }
+  return transfers;
+}
+
+/** Adapts a polled transfer log into the same shape webhook activities use. */
+export function transferLogToActivity(log: TokenTransferLog): AlchemyAddressActivity {
+  return {
+    fromAddress: log.fromAddress,
+    toAddress: log.toAddress,
+    txHash: log.txHash,
+    logIndex: log.logIndex,
+    // The RPC endpoint belongs to the configured network by construction, so the
+    // polled path reports the configured label rather than guessing from payload.
+    network: alchemyConfig().network ?? null,
+    category: "erc20",
+    asset: null,
+    tokenAddress: log.tokenAddress,
+    rawAmount: log.rawAmount,
+    tokenDecimals: null,
+  };
+}
+
 /**
  * Registers a funding address on the Alchemy Address Activity webhook so Alchemy
- * monitors it. Best-effort: when the notify API is unconfigured the address is
- * still reconciled by the sweep, which reads the same Alchemy RPC.
+ * monitors it.
+ *
+ * IMPORTANT: this reports success only when Alchemy actually accepted the
+ * registration. A missing Notify token, an unaccepted HTTP status, or an
+ * unreachable dashboard returns `monitored: false` with a reason, and the caller
+ * keeps the address in a retryable, not-yet-watched state. Registration is never
+ * assumed to have worked.
  */
-export async function registerMonitoredAddress(address: string): Promise<{ monitored: boolean; reason?: string }> {
+export async function registerMonitoredAddress(address: string): Promise<{ monitored: boolean; reason?: string; webhookId?: string }> {
   const cfg = alchemyConfig();
-  const notifyToken = process.env.ALCHEMY_NOTIFY_AUTH_TOKEN?.trim();
-  const webhookId = process.env.ALCHEMY_WEBHOOK_ID?.trim();
-  const webhookUrl = process.env.ALCHEMY_WEBHOOK_URL?.trim();
+  const notifyToken = cfg.notifyToken;
+  const webhookId = cfg.webhookId;
+  const webhookUrl = cfg.webhookUrl;
   const network = cfg.network;
   if (!cfg.apiKeyConfigured || !network) return { monitored: false, reason: "alchemy_unconfigured" };
+  if (!notifyToken) return { monitored: false, reason: "alchemy_notify_unconfigured" };
 
   try {
-    if (notifyToken && webhookId) {
+    if (webhookId) {
       const response = await fetch(`${NOTIFY_API}/update-webhook-addresses`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", "X-Alchemy-Token": notifyToken },
@@ -189,9 +330,9 @@ export async function registerMonitoredAddress(address: string): Promise<{ monit
         cache: "no-store",
       });
       if (!response.ok) return { monitored: false, reason: `alchemy_address_registration_failed_${response.status}` };
-      return { monitored: true };
+      return { monitored: true, webhookId };
     }
-    if (notifyToken && webhookUrl) {
+    if (webhookUrl) {
       const response = await fetch(`${NOTIFY_API}/create-webhook`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Alchemy-Token": notifyToken },
@@ -199,7 +340,9 @@ export async function registerMonitoredAddress(address: string): Promise<{ monit
         cache: "no-store",
       });
       if (!response.ok) return { monitored: false, reason: `alchemy_webhook_create_failed_${response.status}` };
-      return { monitored: true };
+      const payload = await response.json().catch(() => null) as { data?: { id?: string } } | null;
+      const createdId = payload?.data?.id;
+      return { monitored: true, webhookId: typeof createdId === "string" ? createdId : undefined };
     }
     return { monitored: false, reason: "alchemy_notify_unconfigured" };
   } catch {
@@ -215,4 +358,14 @@ export function networkMatchesConfiguredChain(observed: string | null): boolean 
   if (!configured) return true;
   if (!observed) return true;
   return observed.toUpperCase() === configured.toUpperCase();
+}
+
+/**
+ * Exponential backoff (seconds) for a failed address registration, capped at one
+ * hour. Attempt 1 waits 30s, then 60s, 120s … so an Alchemy outage is retried
+ * without hammering the dashboard API.
+ */
+export function registrationRetryDelaySeconds(attempts: number): number {
+  const safe = Number.isFinite(attempts) && attempts > 0 ? Math.floor(attempts) : 1;
+  return Math.min(30 * 2 ** (safe - 1), 3600);
 }

@@ -7,6 +7,10 @@
     {
       "path": "/api/gpu/sweep",
       "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/funding/reconcile",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

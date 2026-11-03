@@ -1,3 +1,5 @@
+import { getAddress } from "viem";
+
 export class ConfigurationError extends Error {
   readonly code = "CONFIGURATION_ERROR";
   constructor(message: string) { super(message); this.name = "ConfigurationError"; }
@@ -34,16 +36,22 @@ export function gpuRentalConfig() { const markup = positiveNumber("GPU_MARKUP_MU
 export function vastConfig() { const raw = optional("VAST_API_KEY"); const apiKey = raw === VAST_API_KEY_PLACEHOLDER ? undefined : raw; if (!apiKey) return { enabled: false as const, apiKey: undefined, baseUrl: undefined }; return { enabled: true as const, apiKey, baseUrl: (optional("VAST_API_BASE_URL") ?? "https://console.vast.ai/api/v0").replace(/\/+$/, "") }; }
 
 /* ==========================================================================
-   Funding (deposit -> compute balance)
+   Funding (USDG deposit -> compute balance)
 
-   Every network and token value below is read from the server environment. This
-   module never invents a chain id, a token contract, or a conversion rate: if the
-   configured values are absent the funding surface reports itself as
-   unconfigured instead of guessing. Token, chain, and Privy credentials stay
-   server-side and are never drafted into a client bundle.
+   The funding asset is USDG on a Robinhood Chain network, and nothing else. Every
+   value is read from the server environment: this module never invents a chain
+   id, an address, or a decimal count. If anything required is absent, malformed,
+   not EIP-55 checksummed, or not the verified USDG contract for the *active*
+   network, the funding surface reports itself as unconfigured (fail closed) with
+   an explicit reason instead of guessing.
+
+   There is deliberately NO HOLDER_TOKEN_ADDRESS fallback any more: the funding
+   asset is configured explicitly with FUNDING_TOKEN_ADDRESS,
+   FUNDING_TOKEN_SYMBOL=USDG and FUNDING_TOKEN_DECIMALS, so an unrelated holder
+   token can never be credited by accident.
 
    Deposit credit uses this project's existing compute ledger convention: balances
-   are integer micro-USD (`compute_ledger_entries.amount_micro_usd`). The token is a
+   are integer micro-USD (`compute_ledger_entries.amount_micro_usd`). USDG is a
    USD-denominated stablecoin, so one whole token equals one USD of compute
    allowance by default (1 token = 1_000_000 micro-USD). FUNDING_USD_PER_TOKEN lets
    an operator change that without a code change.
@@ -53,19 +61,85 @@ export function vastConfig() { const raw = optional("VAST_API_KEY"); const apiKe
 // product requirement is three; the environment override exists for other nets.
 const FUNDING_CONFIRMATIONS_DEFAULT = 3;
 
-function chainIdFromEnv(): number | undefined {
-  const raw = optional("FUNDING_CHAIN_ID") ?? optional("ROBINHOOD_CHAIN_ID") ?? optional("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID");
-  if (!raw) return undefined;
-  const value = Number(raw);
-  return Number.isInteger(value) && value > 0 ? value : undefined;
-}
+/** The only asset this deployment accepts for deposits. */
+export const FUNDING_TOKEN_SYMBOL_USDG = "USDG";
+
+/**
+ * Address supplied for verification against Robinhood's own documentation. It is
+ * recorded here as an UNVERIFIED candidate only: `USDG_NETWORK_REGISTRY` below
+ * keeps it inert until an operator confirms it against official sources, so the
+ * funding path stays closed rather than enabling a guessed address.
+ */
+export const USDG_UNVERIFIED_MAINNET_CANDIDATE = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+
+/**
+ * Per-network USDG configuration. Addresses are NEVER shared between networks:
+ * Robinhood Chain mainnet (4663) and testnet (46630) are distinct deploy
+ * environments with distinct USDG deployments, so each entry carries its own
+ * address, decimals, and verification state.
+ *
+ * `verified` is only true once somebody has confirmed the address and decimals
+ * against official Robinhood Chain / Global Dollar documentation and recorded the
+ * source. While it is false, funding is closed on that network on purpose.
+ */
+export type UsdgNetworkEntry = {
+  chainId: number;
+  chainName: string;
+  /** Verified USDG contract address (EIP-55 checksummed), or null while unverified. */
+  tokenAddress: string | null;
+  /** Verified USDG decimals on this network, or null while unverified. */
+  tokenDecimals: number | null;
+  verified: boolean;
+  verificationSource: string | null;
+  /** Address under consideration that has NOT been verified yet. Never enabled. */
+  pendingVerificationAddress: string | null;
+  /** Confirmations required on this network before credit. */
+  confirmations: number;
+};
+
+export type UsdgNetworkRegistry = Record<number, UsdgNetworkEntry>;
+
+export const ROBINHOOD_MAINNET_CHAIN_ID = 4663;
+export const ROBINHOOD_TESTNET_CHAIN_ID = 46630;
+
+// Official verification for USDG on Robinhood Chain was NOT available when this
+// configuration was written, so both networks ship unverified and therefore
+// closed. Flip `verified`/`tokenAddress`/`tokenDecimals` (and record
+// `verificationSource`) only after confirming the values in official docs.
+export const USDG_NETWORK_REGISTRY: UsdgNetworkRegistry = {
+  [ROBINHOOD_MAINNET_CHAIN_ID]: {
+    chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+    chainName: "Robinhood Chain Mainnet",
+    tokenAddress: null,
+    tokenDecimals: null,
+    verified: false,
+    verificationSource: null,
+    pendingVerificationAddress: USDG_UNVERIFIED_MAINNET_CANDIDATE,
+    confirmations: FUNDING_CONFIRMATIONS_DEFAULT,
+  },
+  [ROBINHOOD_TESTNET_CHAIN_ID]: {
+    chainId: ROBINHOOD_TESTNET_CHAIN_ID,
+    chainName: "Robinhood Chain Testnet",
+    tokenAddress: null,
+    tokenDecimals: null,
+    verified: false,
+    verificationSource: null,
+    pendingVerificationAddress: null,
+    confirmations: FUNDING_CONFIRMATIONS_DEFAULT,
+  },
+};
 
 export type FundingConfig = {
   configured: boolean;
   unconfiguredReason: string | null;
+  /** Every individual configuration problem found, for startup logging/tests. */
+  issues: string[];
   chainId: number;
   chainName: string;
+  /** EIP-55 checksummed USDG contract address, or "" when unusable. */
   tokenAddress: string;
+  /** Lower-cased form of `tokenAddress` for storage and transfer matching. */
+  tokenAddressLower: string;
   tokenSymbol: string;
   tokenDecimals: number;
   confirmations: number;
@@ -75,54 +149,165 @@ export type FundingConfig = {
   minDepositTokens: string;
 };
 
-// Token configuration deliberately falls back to HOLDER_TOKEN_ADDRESS: that is the
-// token this project already configures for Robinhood Chain, so the funding flow
-// reuses the operator's existing network/token choice rather than introducing a
-// second, possibly conflicting, contract address.
-export function fundingConfig(): FundingConfig {
-  const chainId = chainIdFromEnv();
-  const tokenAddress = (optional("FUNDING_TOKEN_ADDRESS") ?? optional("HOLDER_TOKEN_ADDRESS"))?.toLowerCase();
-  const tokenIsAddress = Boolean(tokenAddress && /^0x[a-f0-9]{40}$/.test(tokenAddress));
-  const tokenSymbol = optional("FUNDING_TOKEN_SYMBOL") ?? "USDG";
-  const tokenDecimals = integer("FUNDING_TOKEN_DECIMALS", 6);
+/**
+ * Validates an EVM address the strict way: 20 bytes, 0x-prefixed, and EIP-55
+ * checksummed. A bare lower/upper-case address is rejected because a mistyped
+ * funding contract would silently black-hole deposits.
+ */
+function checksummedAddress(raw: string): { address: string } | { error: string } {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) return { error: "is not a 20-byte 0x-prefixed EVM address" };
+  const body = raw.slice(2);
+  if (body === body.toLowerCase()) return { error: "is not EIP-55 checksummed (all lower case)" };
+  if (body === body.toUpperCase()) return { error: "is not EIP-55 checksummed (all upper case)" };
+  let checksummed: string;
+  try { checksummed = getAddress(raw); } catch { return { error: "has an invalid EIP-55 checksum" }; }
+  if (checksummed !== raw) return { error: "has an invalid EIP-55 checksum" };
+  return { address: checksummed };
+}
+
+export function fundingConfig(options: { networkRegistry?: UsdgNetworkRegistry } = {}): FundingConfig {
+  const registry = options.networkRegistry ?? USDG_NETWORK_REGISTRY;
+  const supported = Object.values(registry).map((entry) => `${entry.chainId} (${entry.chainName})`).join(", ");
+  const issues: string[] = [];
+
+  // 1) Active network. Only a supported Robinhood Chain network can be funded.
+  const chainRaw = optional("FUNDING_CHAIN_ID") ?? optional("ROBINHOOD_CHAIN_ID") ?? optional("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID");
+  let chainId = 0;
+  if (!chainRaw) {
+    issues.push("FUNDING_CHAIN_ID is not set");
+  } else {
+    const parsed = Number(chainRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0) issues.push(`FUNDING_CHAIN_ID is not a positive integer chain id: ${chainRaw}`);
+    else if (!registry[parsed]) issues.push(`FUNDING_CHAIN_ID ${parsed} is not a supported USDG funding network (supported: ${supported})`);
+    else chainId = parsed;
+  }
+  const entry = chainId ? registry[chainId] : undefined;
+  const chainName = entry?.chainName ?? optional("FUNDING_CHAIN_NAME") ?? "Robinhood Chain";
+
+  // 2) Asset symbol. USDG is the only creditable asset.
+  const symbolRaw = optional("FUNDING_TOKEN_SYMBOL");
+  if (!symbolRaw) issues.push(`FUNDING_TOKEN_SYMBOL is not set (must be ${FUNDING_TOKEN_SYMBOL_USDG})`);
+  else if (symbolRaw.toUpperCase() !== FUNDING_TOKEN_SYMBOL_USDG) issues.push(`FUNDING_TOKEN_SYMBOL is ${symbolRaw}; deposits are credited in ${FUNDING_TOKEN_SYMBOL_USDG} only`);
+
+  // 3) Decimals. Explicit, never defaulted: guessing scale mis-prices every deposit.
+  const decimalsRaw = optional("FUNDING_TOKEN_DECIMALS");
+  let tokenDecimals = 0;
+  if (!decimalsRaw) {
+    issues.push(`FUNDING_TOKEN_DECIMALS is not set (USDG's decimals on ${chainName} must be configured explicitly)`);
+  } else {
+    const parsed = Number(decimalsRaw);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 36) issues.push(`FUNDING_TOKEN_DECIMALS is not an integer between 0 and 36: ${decimalsRaw}`);
+    else tokenDecimals = parsed;
+  }
+
+  // 4) Address. Explicit only: no holder-token fallback exists any more.
+  const addressRaw = optional("FUNDING_TOKEN_ADDRESS");
+  let tokenAddress = "";
+  if (!addressRaw) {
+    issues.push(`FUNDING_TOKEN_ADDRESS is not set; the USDG contract on ${chainName} must be configured explicitly (there is no HOLDER_TOKEN_ADDRESS fallback)`);
+  } else {
+    const parsed = checksummedAddress(addressRaw);
+    if ("error" in parsed) issues.push(`FUNDING_TOKEN_ADDRESS ${parsed.error}: ${addressRaw}`);
+    else tokenAddress = parsed.address;
+  }
+
+  // 5) Network-specific verification. An address is only usable on the network it
+  //    was verified for; an unverified entry keeps funding closed.
+  if (entry && tokenAddress) {
+    if (!entry.verified || !entry.tokenAddress || entry.tokenDecimals === null) {
+      const candidate = entry.pendingVerificationAddress ? ` The supplied candidate ${entry.pendingVerificationAddress} is unverified; confirm USDG's address and decimals for ${entry.chainName} (chain id ${entry.chainId}) against official Robinhood Chain documentation before enabling it.` : "";
+      issues.push(`USDG is not verified for ${entry.chainName} (chain id ${entry.chainId}), so funding is closed.${candidate}`);
+    } else {
+      if (entry.tokenAddress.toLowerCase() !== tokenAddress.toLowerCase()) {
+        issues.push(`FUNDING_TOKEN_ADDRESS ${tokenAddress} is not the verified USDG contract ${entry.tokenAddress} on ${entry.chainName} (chain id ${entry.chainId})`);
+      }
+      if (tokenDecimals !== entry.tokenDecimals) {
+        issues.push(`FUNDING_TOKEN_DECIMALS is ${tokenDecimals} but USDG uses ${entry.tokenDecimals} decimals on ${entry.chainName}`);
+      }
+      for (const other of Object.values(registry)) {
+        if (other.chainId === entry.chainId) continue;
+        if (other.tokenAddress && other.tokenAddress.toLowerCase() === tokenAddress.toLowerCase()) {
+          issues.push(`USDG address ${tokenAddress} is already assigned to ${other.chainName}; each Robinhood Chain network needs its own USDG contract address`);
+        }
+      }
+    }
+  }
+
   const pin = optional("FUNDING_USD_PER_TOKEN");
-  const wholeTokens = pin === undefined ? 1_000_000n : BigInt(Math.round(Number(pin) * 1_000_000));
-  const unconfiguredReason = !chainId
-    ? "FUNDING_CHAIN_ID is not set"
-    : !tokenIsAddress
-      ? "FUNDING_TOKEN_ADDRESS (or HOLDER_TOKEN_ADDRESS) is not set to a valid token contract"
-      : null;
+  const pinMicro = pin === undefined ? 1_000_000n : BigInt(Math.round(Number(pin) * 1_000_000));
+  const microUsdPerToken = pinMicro > 0n ? pinMicro : 1_000_000n;
+  const confirmations = Math.max(1, integer("FUNDING_CONFIRMATIONS", entry?.confirmations ?? FUNDING_CONFIRMATIONS_DEFAULT));
+  const issueList = Array.from(new Set(issues));
+
   return {
-    configured: unconfiguredReason === null,
-    unconfiguredReason,
-    chainId: chainId ?? 0,
-    chainName: optional("FUNDING_CHAIN_NAME") ?? "Robinhood Chain",
-    tokenAddress: tokenIsAddress ? (tokenAddress as string) : "",
-    tokenSymbol,
+    configured: issueList.length === 0,
+    unconfiguredReason: issueList.length === 0 ? null : issueList.join("; "),
+    issues: issueList,
+    chainId,
+    chainName,
+    tokenAddress,
+    tokenAddressLower: tokenAddress.toLowerCase(),
+    tokenSymbol: FUNDING_TOKEN_SYMBOL_USDG,
     tokenDecimals,
-    confirmations: Math.max(1, integer("FUNDING_CONFIRMATIONS", FUNDING_CONFIRMATIONS_DEFAULT)),
-    microUsdPerToken: wholeTokens > 0n ? wholeTokens : 1_000_000n,
+    confirmations,
+    microUsdPerToken,
     minDepositTokens: optional("FUNDING_MIN_DEPOSIT_TOKENS") ?? "0",
   };
 }
 
+/**
+ * Startup/route-time guard: throws a ConfigurationError listing every funding
+ * problem. Used wherever funding must be provably correct before continuing.
+ */
+export function assertFundingConfig(options: { networkRegistry?: UsdgNetworkRegistry } = {}): FundingConfig {
+  const cfg = fundingConfig(options);
+  if (!cfg.configured) throw new ConfigurationError(`Invalid funding configuration: ${cfg.unconfiguredReason}`);
+  return cfg;
+}
+
 // Alchemy is the only chain-monitoring provider used here: notifications arrive as
 // an Alchemy Address Activity webhook (verified with the webhook's signing key) and
-// confirmation counts are read from Alchemy's HTTP RPC endpoint for the same app.
+// the fallback reconciliation reads the same account's JSON-RPC endpoint. Every
+// credential is server-only and never leaves this process.
 export function alchemyConfig() {
   const apiKey = optional("ALCHEMY_API_KEY");
   const signingKey = optional("ALCHEMY_WEBHOOK_SIGNING_KEY");
   const authToken = optional("ALCHEMY_WEBHOOK_AUTH_TOKEN");
+  const notifyToken = optional("ALCHEMY_NOTIFY_AUTH_TOKEN");
+  const webhookId = optional("ALCHEMY_WEBHOOK_ID");
+  const webhookUrl = optional("ALCHEMY_WEBHOOK_URL");
   const network = optional("ALCHEMY_NETWORK") ?? optional("FUNDING_ALCHEMY_NETWORK");
   // Standard Alchemy HTTP endpoint shape: https://<network>.g.alchemy.com/v2/<key>
   const rpcUrl = optional("ALCHEMY_RPC_URL") ?? (apiKey && network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : undefined);
   return {
     apiKeyConfigured: Boolean(apiKey),
+    /** Webhook signature verification is only possible with a signing key. */
     webhookConfigured: Boolean(signingKey),
+    webhookId,
+    webhookUrl,
+    /** Notify API token, used to register deposit addresses for address activity. */
+    notifyToken,
+    /** True when an address can actually be registered on a Notify webhook. */
+    addressRegistrationConfigured: Boolean(notifyToken && (webhookId || webhookUrl)),
     authToken,
     network,
     rpcUrl,
     enabled: Boolean(rpcUrl),
+  };
+}
+
+/**
+ * Reconciliation tuning for the polling fallback and address-registration retry.
+ * All values are optional with conservative defaults so a deployment without any
+ * of these variables still reconciles.
+ */
+export function fundingReconcileConfig() {
+  return {
+    cronSecret: optional("CRON_SECRET"),
+    maxWalletsPerRun: Math.max(1, integer("FUNDING_RECONCILE_MAX_WALLETS", 25)),
+    maxChunkBlocks: Math.max(100, integer("FUNDING_RECONCILE_CHUNK_BLOCKS", 5000)),
+    reorgDepthBlocks: Math.max(1, integer("FUNDING_REORG_DEPTH", 12)),
+    maxRegistrationAttempts: Math.max(1, integer("FUNDING_REGISTRATION_MAX_ATTEMPTS", 8)),
   };
 }
 
