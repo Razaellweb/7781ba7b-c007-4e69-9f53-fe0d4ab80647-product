@@ -23,6 +23,8 @@ type ApiKeyResult = { key: ApiKey; secret: string };
 type ApiError = { error?: string };
 
 const dateLabel = (value: string | null) => value ? new Date(value).toLocaleString() : "Never";
+/** Only same-origin Playground paths are accepted, so returnTo cannot open-redirect. */
+const safeReturnTo = (value: string | null) => value && /^\/chat(\?[^#\\s]*)?$/.test(value) ? value : null;
 
 export default function SettingsPage() {
   const { ready, authenticated, getAccessToken } = usePrivy();
@@ -34,7 +36,15 @@ export default function SettingsPage() {
   const [loadError, setLoadError] = useState("");
   const [message, setMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [returnTo, setReturnTo] = useState<string | null>(null);
   const actionInProgress = useRef(false);
+
+  // The Playground links here with ?returnTo=/chat?model=... so the exact model
+  // the user was on can be restored when they come back to send a message.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setReturnTo(safeReturnTo(new URLSearchParams(window.location.search).get("returnTo")));
+  }, []);
 
   const headers = useCallback(async () => {
     const token = await getAccessToken();
@@ -182,9 +192,11 @@ export default function SettingsPage() {
         </div>
         <div className="compute-header-actions">
           <span className="compute-access"><i /> PRIVATE TO YOUR ACCOUNT</span>
+          {returnTo && <Link className="key-quiet-button" href={returnTo}>← Back to Playground</Link>}
           <button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? "Refreshing..." : "Refresh"}</button>
         </div>
       </header>
+      {returnTo && <div className="key-feedback" role="status">Create a key below, then choose <strong>Back to Playground</strong> to return with your selected model and send your message.</div>}
       <section className="chat-api-guide" aria-labelledby="chat-api-guide-title">
         <div className="chat-api-guide-heading">
           <div className="compute-card-label">CHAT COMPLETIONS API</div>

@@ -32,3 +32,102 @@ export const VAST_API_KEY_PLACEHOLDER = "REPLACE_WITH_YOUR_VAST_API_KEY";
 function positiveNumber(name: string, fallback: number): number { const raw = optional(name); if (!raw) return fallback; const value = Number(raw); if (!Number.isFinite(value) || value <= 0) throw new ConfigurationError(`${name} must be a positive number`); return value; }
 export function gpuRentalConfig() { const markup = positiveNumber("GPU_MARKUP_MULTIPLIER", 1.15); const productionHost = optional("VERCEL_PROJECT_PRODUCTION_URL"); return { markupMicro: BigInt(Math.round(markup * 1_000_000)), blockMinutes: Math.max(10, Math.round(positiveNumber("GPU_BILLING_BLOCK_MINUTES", 60))), maxHourlyUsd: positiveNumber("GPU_MAX_HOURLY_USD", 5), maxActiveRentals: Math.max(1, Math.round(positiveNumber("GPU_MAX_ACTIVE_RENTALS", 2))), diskGb: Math.round(positiveNumber("GPU_DISK_GB", 40)), appBaseUrl: (optional("APP_BASE_URL") ?? (productionHost ? `https://${productionHost}` : undefined))?.replace(/\/+$/, ""), cronSecret: optional("CRON_SECRET") }; }
 export function vastConfig() { const raw = optional("VAST_API_KEY"); const apiKey = raw === VAST_API_KEY_PLACEHOLDER ? undefined : raw; if (!apiKey) return { enabled: false as const, apiKey: undefined, baseUrl: undefined }; return { enabled: true as const, apiKey, baseUrl: (optional("VAST_API_BASE_URL") ?? "https://console.vast.ai/api/v0").replace(/\/+$/, "") }; }
+
+/* ==========================================================================
+   Funding (deposit -> compute balance)
+
+   Every network and token value below is read from the server environment. This
+   module never invents a chain id, a token contract, or a conversion rate: if the
+   configured values are absent the funding surface reports itself as
+   unconfigured instead of guessing. Token, chain, and Privy credentials stay
+   server-side and are never drafted into a client bundle.
+
+   Deposit credit uses this project's existing compute ledger convention: balances
+   are integer micro-USD (`compute_ledger_entries.amount_micro_usd`). The token is a
+   USD-denominated stablecoin, so one whole token equals one USD of compute
+   allowance by default (1 token = 1_000_000 micro-USD). FUNDING_USD_PER_TOKEN lets
+   an operator change that without a code change.
+   ========================================================================== */
+
+// How many block confirmations a transfer must reach before it is credited. The
+// product requirement is three; the environment override exists for other nets.
+const FUNDING_CONFIRMATIONS_DEFAULT = 3;
+
+function chainIdFromEnv(): number | undefined {
+  const raw = optional("FUNDING_CHAIN_ID") ?? optional("ROBINHOOD_CHAIN_ID") ?? optional("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID");
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+export type FundingConfig = {
+  configured: boolean;
+  unconfiguredReason: string | null;
+  chainId: number;
+  chainName: string;
+  tokenAddress: string;
+  tokenSymbol: string;
+  tokenDecimals: number;
+  confirmations: number;
+  /** Micro-USD credited per whole token. */
+  microUsdPerToken: bigint;
+  /** Smallest deposit that receives credit, in whole-token units. */
+  minDepositTokens: string;
+};
+
+// Token configuration deliberately falls back to HOLDER_TOKEN_ADDRESS: that is the
+// token this project already configures for Robinhood Chain, so the funding flow
+// reuses the operator's existing network/token choice rather than introducing a
+// second, possibly conflicting, contract address.
+export function fundingConfig(): FundingConfig {
+  const chainId = chainIdFromEnv();
+  const tokenAddress = (optional("FUNDING_TOKEN_ADDRESS") ?? optional("HOLDER_TOKEN_ADDRESS"))?.toLowerCase();
+  const tokenIsAddress = Boolean(tokenAddress && /^0x[a-f0-9]{40}$/.test(tokenAddress));
+  const tokenSymbol = optional("FUNDING_TOKEN_SYMBOL") ?? "USDG";
+  const tokenDecimals = integer("FUNDING_TOKEN_DECIMALS", 6);
+  const pin = optional("FUNDING_USD_PER_TOKEN");
+  const wholeTokens = pin === undefined ? 1_000_000n : BigInt(Math.round(Number(pin) * 1_000_000));
+  const unconfiguredReason = !chainId
+    ? "FUNDING_CHAIN_ID is not set"
+    : !tokenIsAddress
+      ? "FUNDING_TOKEN_ADDRESS (or HOLDER_TOKEN_ADDRESS) is not set to a valid token contract"
+      : null;
+  return {
+    configured: unconfiguredReason === null,
+    unconfiguredReason,
+    chainId: chainId ?? 0,
+    chainName: optional("FUNDING_CHAIN_NAME") ?? "Robinhood Chain",
+    tokenAddress: tokenIsAddress ? (tokenAddress as string) : "",
+    tokenSymbol,
+    tokenDecimals,
+    confirmations: Math.max(1, integer("FUNDING_CONFIRMATIONS", FUNDING_CONFIRMATIONS_DEFAULT)),
+    microUsdPerToken: wholeTokens > 0n ? wholeTokens : 1_000_000n,
+    minDepositTokens: optional("FUNDING_MIN_DEPOSIT_TOKENS") ?? "0",
+  };
+}
+
+// Alchemy is the only chain-monitoring provider used here: notifications arrive as
+// an Alchemy Address Activity webhook (verified with the webhook's signing key) and
+// confirmation counts are read from Alchemy's HTTP RPC endpoint for the same app.
+export function alchemyConfig() {
+  const apiKey = optional("ALCHEMY_API_KEY");
+  const signingKey = optional("ALCHEMY_WEBHOOK_SIGNING_KEY");
+  const authToken = optional("ALCHEMY_WEBHOOK_AUTH_TOKEN");
+  const network = optional("ALCHEMY_NETWORK") ?? optional("FUNDING_ALCHEMY_NETWORK");
+  // Standard Alchemy HTTP endpoint shape: https://<network>.g.alchemy.com/v2/<key>
+  const rpcUrl = optional("ALCHEMY_RPC_URL") ?? (apiKey && network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : undefined);
+  return {
+    apiKeyConfigured: Boolean(apiKey),
+    webhookConfigured: Boolean(signingKey),
+    authToken,
+    network,
+    rpcUrl,
+    enabled: Boolean(rpcUrl),
+  };
+}
+
+// Privy server-side wallet API. The optional authorization key is only needed when
+// the Privy app has an authorization keypair enabled for wallet creation; when it is
+// present it is used exclusively inside this process to sign outbound wallet-api
+// requests. It is never sent to a browser and never logged.
+export function privyWalletConfig() { return { authorizationPrivateKey: optional("PRIVY_WALLET_AUTHORIZATION_PRIVATE_KEY") }; }

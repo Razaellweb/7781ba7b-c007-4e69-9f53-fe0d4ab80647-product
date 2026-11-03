@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { listDiscoverableModels, syncCuratedModels } from "../../../lib/server/models";
+import { deriveCapabilities } from "../../../lib/server/model-capabilities";
 import { ensureMigrated } from "../../../lib/server/migrate";
 
 // The model registry is not access-controlled: every visitor — and every
@@ -21,6 +22,17 @@ export async function GET() {
       // The card shows the company behind the model. The internal routing
       // channel (`provider`) is server plumbing and is never rendered.
       const displayProvider = model.display_provider?.trim() || model.family?.trim() || model.display_name;
+      // Context window, tools, and vision come from verified provider metadata
+      // only. When the live catalog is unreachable the last successful sync stays
+      // in place and is labelled as cached rather than dropped.
+      const capabilities = deriveCapabilities({
+        contextLength: metadata?.contextLength ?? model.context_length,
+        inputModalities: metadata?.architecture.inputModalities ?? null,
+        supportedParameters: metadata?.supportedParameters ?? null,
+        metadataPresent: Boolean(metadata),
+        syncStatus: model.provider_sync_status,
+        availability: metadata?.availability ?? null,
+      });
       return {
         id: model.slug,
         slug: model.slug,
@@ -38,7 +50,11 @@ export async function GET() {
         inputModalities: metadata?.architecture.inputModalities ?? null,
         outputModalities: metadata?.architecture.outputModalities ?? null,
         supportedParameters: metadata?.supportedParameters ?? null,
-        contextLength: metadata?.contextLength ?? model.context_length,
+        contextLength: capabilities.contextWindow.tokens,
+        contextWindowLabel: capabilities.contextWindow.label,
+        toolsSupport: capabilities.tools,
+        visionSupport: capabilities.vision,
+        capabilitySource: capabilities.source,
         capabilityMetadata: metadata ? "verified" : "unavailable",
         licenseStatus: model.license_status || "unavailable",
         providerTermsStatus: model.provider_terms_status || "unavailable",

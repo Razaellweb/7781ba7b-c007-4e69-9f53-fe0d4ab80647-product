@@ -5,6 +5,9 @@ import { query, transaction } from "./db";
 const KEY_PATTERN = /^ow_live_[A-Za-z0-9_-]{43}$/;
 const MAX_KEYS_PER_ACCOUNT = 20;
 const DEFAULT_SCOPES = ["chat:write", "account:read"];
+const CHAT_SCOPE = "chat:write";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const KEY_COLUMNS = "id,account_id,name,secret_hash,scopes,rate_limit_per_minute,created_at,last_used_at,revoked_at";
 
 type KeyRow = {
   id: string;
@@ -25,6 +28,16 @@ export class ApiKeyError extends Error {
 }
 
 export type ApiKeyMetadata = Omit<KeyRow, "secret_hash" | "account_id"> & { key_prefix: "ow_live" };
+
+/** Public, non-secret identity of a key that authorized a first-party request. */
+export type ActiveAccountKey = {
+  id: string;
+  name: string;
+  scopes: string[];
+  rateLimitPerMinute: number;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
 
 function hashSecret(secret: string) {
   return createHash("sha256").update(secret, "utf8").digest("hex");
@@ -164,6 +177,40 @@ export async function revokeApiKey(accountId: string, id: string) {
   );
   if (!rows.length) throw new ApiKeyError("KEY_NOT_FOUND", "API key could not be revoked", 404);
   return { revoked: true };
+}
+
+/**
+ * Resolves the account-owned API key that authorizes a first-party request such
+ * as the Playground. Ownership, revocation state, and the chat:write scope are
+ * all read from the database on every call, so a revoked key, another account's
+ * key, or purely client-side state can never authorize a request.
+ */
+export async function requireActiveAccountKey(accountId: string, keyId?: string | null): Promise<ActiveAccountKey> {
+  const requested = typeof keyId === "string" && keyId.trim() ? keyId.trim() : null;
+  if (requested && !UUID_PATTERN.test(requested)) {
+    throw new ApiKeyError("API_KEY_NOT_FOUND", "That API key does not belong to this account", 403);
+  }
+  const rows = requested
+    ? await query<KeyRow>(`SELECT ${KEY_COLUMNS} FROM api_keys WHERE id=$1 AND account_id=$2 LIMIT 1`, [requested, accountId])
+    : await query<KeyRow>(
+      `SELECT ${KEY_COLUMNS} FROM api_keys
+       WHERE account_id=$1 AND revoked_at IS NULL AND $2 = ANY(scopes)
+       ORDER BY created_at DESC LIMIT 1`,
+      [accountId, CHAT_SCOPE],
+    );
+  const row = rows[0];
+  if (!row) throw new ApiKeyError("API_KEY_REQUIRED", "You need an API key to use the Playground", 403);
+  if (row.revoked_at) throw new ApiKeyError("API_KEY_REVOKED", "That API key has been revoked. Create a new key to keep using the Playground.", 403);
+  if (!row.scopes.includes(CHAT_SCOPE)) throw new ApiKeyError("API_KEY_SCOPE", "That API key cannot make chat requests", 403);
+  await query("UPDATE api_keys SET last_used_at=now() WHERE id=$1 AND account_id=$2 AND revoked_at IS NULL", [row.id, accountId]);
+  return {
+    id: row.id,
+    name: row.name,
+    scopes: row.scopes,
+    rateLimitPerMinute: row.rate_limit_per_minute,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+  };
 }
 
 export async function authenticateApiKey(authorization: string | null, requiredScope?: string) {

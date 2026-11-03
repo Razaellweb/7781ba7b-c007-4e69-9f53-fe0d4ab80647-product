@@ -1,5 +1,6 @@
 import { query, transaction } from "./db";
 import { OpenRouterProvider } from "./openrouter";
+import { MAX_DISCOUNT_BPS, normalizeDiscountBps } from "./pricing";
 
 type ProviderMetadata = {
   contextLength: number | null;
@@ -26,6 +27,10 @@ export type ModelRow = {
   display_provider: string | null;
   markup_micro: string;
   min_charge_micro_usd: string;
+  /** Open-weight models are the only models a percentage discount applies to. */
+  open_weight: boolean;
+  /** Per-model discount in basis points (0-10000). 0 means standard price. */
+  discount_bps: number;
   license_status: string;
   provider_terms_status: string;
   provider_metadata: ProviderMetadata | null;
@@ -57,6 +62,7 @@ function modelSelect(): string {
   return `SELECT slug, display_name, family, provider, provider_model_slug, source_url,
     status, visibility, featured, sort_order, context_length, description, display_provider,
     markup_micro::text AS markup_micro, min_charge_micro_usd::text AS min_charge_micro_usd,
+    open_weight, discount_bps,
     license_status, provider_terms_status, provider_metadata, provider_sync_status, provider_synced_at, provider_sync_error
     FROM models`;
 }
@@ -126,4 +132,55 @@ export async function getActiveModel(slug: string): Promise<ModelRow | null> {
 
 export async function pickAutoModel(): Promise<ModelRow | null> {
   return (await selectModels("status = 'active' AND visibility = 'public' AND provider_sync_status = 'current'", [], "featured DESC, sort_order ASC, display_name ASC", 1))[0] ?? null;
+}
+
+/* ==========================================================================
+   Admin control plane: per-model open-weight discount
+
+   `discount_bps` is the only column an operator writes here. It is clamped into
+   the 0..10000 basis-point range before it ever reaches SQL (negative is refused,
+   anything above 100% becomes 100%), and the write is restricted to open-weight
+   models so every other model keeps its existing standard price.
+   ========================================================================== */
+
+export class ModelDiscountError extends Error {
+  constructor(readonly code: string, message: string, readonly status = 400) {
+    super(message);
+    this.name = "ModelDiscountError";
+  }
+}
+
+/** Every model the discount editor is allowed to show: open-weight models only. */
+export async function listOpenWeightModels(): Promise<ModelRow[]> {
+  return selectModels("open_weight = true", [], "sort_order ASC, display_name ASC");
+}
+
+export async function getModelBySlug(slug: string): Promise<ModelRow | null> {
+  return (await selectModels("slug = $1", [slug], "sort_order ASC, display_name ASC", 1))[0] ?? null;
+}
+
+/**
+ * Persists a single model's open-weight discount. The caller passes an already
+ * normalised basis-point value; this layer re-validates it so a bad value can
+ * never be written even if a future caller forgets to.
+ */
+export async function updateModelDiscount(slug: string, discountBps: number): Promise<ModelRow> {
+  if (!Number.isFinite(discountBps) || discountBps < 0) {
+    throw new ModelDiscountError("INVALID_DISCOUNT", "Discount must be zero or greater", 400);
+  }
+  const clamped = Math.min(MAX_DISCOUNT_BPS, Math.round(discountBps));
+  const rows = await query<{ slug: string; discount_bps: number; open_weight: boolean }>(
+    `UPDATE models SET discount_bps = $2, updated_at = now()
+      WHERE slug = $1 AND open_weight = true
+      RETURNING slug, discount_bps, open_weight`,
+    [slug, clamped],
+  );
+  if (!rows.length) {
+    const existing = await getModelBySlug(slug);
+    if (!existing) throw new ModelDiscountError("MODEL_NOT_FOUND", "That model is not in the registry", 404);
+    throw new ModelDiscountError("NOT_OPEN_WEIGHT", "Discounts apply to open-weight models only", 400);
+  }
+  const updated = await getModelBySlug(slug);
+  if (!updated) throw new ModelDiscountError("MODEL_NOT_FOUND", "That model is not in the registry", 404);
+  return { ...updated, discount_bps: normalizeDiscountBps(updated.discount_bps) };
 }

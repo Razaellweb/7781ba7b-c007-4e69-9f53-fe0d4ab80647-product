@@ -531,6 +531,77 @@
   background: #141414 !important;
 }
 
+/* --------------------------- Model capability row ------------------------ */
+/* Context window, tool calling, and image input, read from verified provider
+   metadata. Confirmed support is a bright hairline chip with a filled dot;
+   confirmed absence is muted; missing metadata shows N/A rather than a claim. */
+.compute-dashboard .model-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 0;
+  min-width: 0;
+}
+.compute-dashboard .capability-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 99px;
+  background: #171717;
+  color: #a2a2a8;
+  font: 9.5px var(--font-geist-mono), monospace;
+  letter-spacing: .06em;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.compute-dashboard .capability-chip i {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+.compute-dashboard .capability-chip em {
+  font-style: normal;
+  color: #75757b;
+  letter-spacing: .04em;
+}
+.compute-dashboard .capability-chip.is-context {
+  color: #cfcfd4;
+  font-variant-numeric: tabular-nums;
+}
+.compute-dashboard .capability-chip.is-on {
+  border-color: rgba(127, 216, 162, .26);
+  background: rgba(127, 216, 162, .1);
+  color: #9fe6bb;
+}
+.compute-dashboard .capability-chip.is-off {
+  border-color: rgba(255, 255, 255, .08);
+  background: #141414;
+  color: #75757b;
+  text-decoration: line-through;
+}
+.compute-dashboard .capability-chip.is-unknown {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, .14);
+  background: #121212;
+  color: #8b8b91;
+}
+.compute-dashboard .capability-chip.is-cached {
+  border-color: rgba(185, 164, 120, .28);
+  background: rgba(185, 164, 120, .1);
+  color: #cbb389;
+}
+.compute-dashboard article.compute-model-card .model-capabilities { margin-top: 12px; }
+.compute-dashboard .compute-model-card .model-card-summary + .model-capabilities { margin-top: 12px; }
+/* The card arrow occupies the bottom-right corner, so the capability row keeps
+   clear of it and wraps instead of running underneath. */
+.compute-dashboard .compute-model-card .model-capabilities { padding-right: 40px; }
+
 /* ------------------------------ Auto model ------------------------------ */
 .compute-dashboard .auto-model-row {
   display: flex;
@@ -734,6 +805,7 @@
 .compute-dashboard .model-copy-button:hover { border-color: rgba(255, 255, 255, .34) !important; color: #ffffff !important; }
 .compute-dashboard .model-copy-feedback { border: 1px solid var(--dash-line-strong) !important; border-radius: 9px; background: #1c1c1c !important; color: #ededf0 !important; }
 .compute-dashboard .model-modal-note { color: #b9a478 !important; }
+.compute-dashboard .model-modal .model-capabilities { margin-top: 0; }
 
 /* --------------------------- Focus + motion ----------------------------- */
 .compute-dashboard :is(a, button, input, select, textarea):focus-visible {
@@ -824,6 +896,7 @@
   .compute-dashboard .auto-model-row { gap: 13px; padding: 15px; }
   .compute-dashboard .auto-model-copy p { font-size: 12px; }
   .compute-dashboard .compute-section-head h2 { font-size: 1.25rem; }
+  .compute-dashboard .compute-model-card .model-capabilities { padding-right: 0; }
 }
 @media (max-width: 420px) {
   .compute-dashboard .compute-main { padding-inline: 14px; }
@@ -833,6 +906,7 @@
   .compute-dashboard .compute-availability { font-size: 9.5px; padding: 5px 10px; }
   .compute-dashboard .compute-sidebar nav a span:last-child { display: none; }
   .compute-dashboard .compute-sidebar nav a { padding: 9px 13px; }
+  .compute-dashboard .capability-chip { font-size: 9px; padding: 3px 7px; gap: 5px; }
 }
 
 /* ------------------------- Models page additions ------------------------ */

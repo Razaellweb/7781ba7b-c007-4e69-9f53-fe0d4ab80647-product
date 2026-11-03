@@ -6,14 +6,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import WorkspaceShell from "../../components/WorkspaceShell";
 import ModelLogo from "../../components/ModelLogo";
+import ModelCapabilities, { type CapabilityModel } from "../../components/ModelCapabilities";
 import "../dashboard/dashboard.css";
 import "../dashboard/dashboard-overview.css";
 
-type Model = { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; availability: "available" | "unavailable" | "stale"; syncStatus: string };
+type Model = CapabilityModel & { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; availability: "available" | "unavailable" | "stale"; syncStatus: string };
 type LoadState = "loading" | "ready" | "error";
 
 const operational = (model: Model) => model.registryStatus === "active" && model.syncStatus === "current" && model.availability === "available";
-const contextLabel = (value: number | null) => { if (value == null || value <= 0) return null; return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M tokens` : `${Math.round(value / 1000)}K tokens`; };
 const pricingValue = (pricing: Record<string, string> | null, keys: string[]) => { const key = keys.find((candidate) => pricing?.[candidate] != null); const numeric = key ? Number(pricing?.[key]) : NaN; return Number.isFinite(numeric) && numeric >= 0 ? `$${(numeric * 1_000_000).toFixed(2)}` : null; };
 const statusLabel = (model: Model) => model.registryStatus === "paused" ? "Paused" : model.availability === "stale" || model.syncStatus === "stale" ? "Metadata stale" : model.availability === "unavailable" || model.syncStatus === "unavailable" || model.syncStatus === "never" ? "Unavailable" : operational(model) ? "Available" : model.registryStatus.replaceAll("_", " ");
 const creatorLabel = (model: Model) => model.providerLabel?.trim() || model.family?.trim() || model.provider;
@@ -71,14 +71,14 @@ export default function ModelsPage() {
           const isOperational = operational(model);
           const input = pricingValue(model.pricing, ["prompt", "input"]);
           const output = pricingValue(model.pricing, ["completion", "output"]);
-          const priceNote = input || output ? `${input ?? "—"} in · ${output ?? "—"} out per 1M` : "Pricing unavailable";
-          const context = contextLabel(model.contextLength);
+          const priceNote = input || output ? `${input ?? "—"} in · ${output ?? "—"} out per 1M` : null;
           return <article key={model.id} className={`compute-model-card ${isOperational ? "" : "is-gated"}`}>
             <div className="model-card-top"><span className="model-glyph"><ModelLogo model={model} /></span><span className={`model-status ${isOperational ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {statusLabel(model)}</span></div>
             <h3>{model.displayName}</h3>
             <p className="model-card-by">by {creatorLabel(model)}</p>
             <p className="model-card-summary">{model.description?.trim() || "Ready to use through your compute allowance."}</p>
-            <p className="model-card-by">{context ? `${context} context` : "Context window unavailable"} · {priceNote}</p>
+            <ModelCapabilities model={model} />
+            {priceNote && <p className="model-card-by">{priceNote}</p>}
             {isOperational
               ? <Link className="model-list-action" href={`/playground?model=${encodeURIComponent(model.id)}`}>Open in Playground <span aria-hidden="true">→</span></Link>
               : <span className="model-list-action is-disabled">Unavailable</span>}

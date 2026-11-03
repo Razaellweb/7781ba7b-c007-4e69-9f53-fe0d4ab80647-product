@@ -7,13 +7,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import WorkspaceShell from "../../components/WorkspaceShell";
 import ModelLogo from "../../components/ModelLogo";
+import ModelCapabilities, { capabilityText, contextWindowLabel, type CapabilityModel } from "../../components/ModelCapabilities";
 import "./dashboard.css";
 import "./dashboard-overview.css";
 
 type SessionState = "loading" | "ready" | "error" | "unauthenticated";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Activity = { operation_key: string; model: string; status: string; input_tokens: number | null; output_tokens: number | null; user_debit_micro_usd: string | null; created_at: string };
-type Model = { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; sourceUrl: string | null; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; licenseStatus: string; providerTermsStatus: string; availability: "available" | "unavailable" | "stale"; syncStatus: string };
+type Model = CapabilityModel & { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; sourceUrl: string | null; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; licenseStatus: string; providerTermsStatus: string; availability: "available" | "unavailable" | "stale"; syncStatus: string };
 type AccountResponse = { account: { walletAddress: string | null } };
 type AllowanceResponse = { balance?: { available?: string }; allowance?: { amount_micro_usd?: string; period_end?: string } | null };
 
@@ -24,6 +25,8 @@ const formatMicroUsd = (micro: string | null | undefined) => { const value = cla
 const compactUsd = (micro: string | null | undefined) => micro == null ? "—" : formatMicroUsd(micro);
 const relativeTime = (iso: string) => { const timestamp = new Date(iso).getTime(); if (Number.isNaN(timestamp)) return ""; const minutes = Math.floor(Math.max(0, Date.now() - timestamp) / 60000); if (minutes < 1) return "Just now"; if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; };
 const unavailable = "Unavailable";
+// Missing feature metadata is reported as N/A, never as unsupported.
+const notAvailable = "N/A";
 const pricingValue = (pricing: Record<string, string> | null, keys: string[]) => { const key = keys.find((candidate) => pricing?.[candidate] != null); const numeric = key ? Number(pricing?.[key]) : NaN; return Number.isFinite(numeric) && numeric >= 0 ? `$${(numeric * 1_000_000).toFixed(2)} / 1M tokens` : null; };
 const operational = (model: Model) => model.registryStatus === "active" && model.syncStatus === "current" && model.availability === "available";
 const statusLabel = (model: Model) => model.registryStatus === "paused" ? "Paused" : model.availability === "stale" || model.syncStatus === "stale" ? "Metadata stale" : model.availability === "unavailable" || model.syncStatus === "unavailable" || model.syncStatus === "never" ? "Unavailable" : operational(model) ? "Available" : model.registryStatus.replaceAll("_", " ");
@@ -33,8 +36,8 @@ const creatorLabel = (model: Model) => model.providerLabel?.trim() || model.fami
 const cardSummary = (model: Model) => {
   const description = model.description?.trim();
   if (description) return description;
-  const context = model.contextLength && model.contextLength > 0 ? (model.contextLength >= 1_000_000 ? `${(model.contextLength / 1_000_000).toFixed(model.contextLength % 1_000_000 === 0 ? 0 : 1)}M token context` : `${Math.round(model.contextLength / 1000)}K token context`) : null;
-  return context ?? "Ready to use through your compute allowance.";
+  const context = contextWindowLabel(model.contextLength);
+  return context ? `${context} token context` : "Ready to use through your compute allowance.";
 };
 // A model identifier appears once. Duplicate registry rows never render twice.
 const dedupeModels = (models: Model[]) => { const seen = new Set<string>(); const unique: Model[] = []; for (const model of models) { const key = (model.id || "").trim().toLowerCase(); if (!key || seen.has(key)) continue; seen.add(key); unique.push(model); } return unique; };
@@ -55,6 +58,7 @@ function ModelCard({ model, onOpen }: { model: Model; onOpen: (model: Model, con
     <h3>{model.displayName}</h3>
     <p className="model-card-by">by {creatorLabel(model)}</p>
     <p className="model-card-summary">{cardSummary(model)}</p>
+    <ModelCapabilities model={model} />
     <span className="model-card-arrow" aria-hidden="true"><span>→</span></span>
   </button>;
 }
@@ -88,14 +92,16 @@ function ModelDetails({ model, onClose, onUse, onCopied }: { model: Model; onClo
   const status = statusLabel(model);
   const endpoint = "/api/v1/chat/completions";
   const quickstart = `curl https://openweight.systems${endpoint} \\\n  -H "Authorization: Bearer $OPENWEIGHT_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model.id}","messages":[{"role":"user","content":"Hello"}]}'`;
+  const context = model.contextWindowLabel?.trim() || contextWindowLabel(model.contextLength);
   return <div className="model-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} className="model-modal" role="dialog" aria-modal="true" aria-labelledby="model-details-title" aria-describedby="model-details-description" tabIndex={-1}>
     <header className="model-modal-header"><div><div className="compute-card-label">MODEL · {creatorLabel(model).toUpperCase()}</div><h2 id="model-details-title">{model.displayName}</h2><p id="model-details-description">{model.description?.trim() || (model.family ? `${model.family} family · ` : "") + "Registry details and current operational state."}</p></div><button type="button" className="model-modal-close" onClick={onClose} aria-label="Close model details">×</button></header>
     <div className="model-modal-body"><div className="model-detail-identity"><div><span className="model-detail-label">MODEL IDENTIFIER</span><code>{model.id}</code></div><CopyButton value={model.id} label="model identifier" onCopied={onCopied} /></div>
       <div className="model-detail-identity"><div><span className="model-detail-label">PROVIDER IDENTIFIER · SERVER ROUTING ONLY</span><code>{model.providerModelSlug || unavailable}</code></div>{model.providerModelSlug && <CopyButton value={model.providerModelSlug} label="provider model identifier" onCopied={onCopied} />}</div>
       <div className="model-detail-status"><span className={`model-status ${operational(model) ? "" : model.registryStatus === "paused" ? "paused" : "unavailable"}`}><i /> {status}</span><span className="model-detail-access">Registry · {model.registryStatus}</span>{model.sourceUrl ? <a href={model.sourceUrl} target="_blank" rel="noreferrer">Model source ↗</a> : <span className="model-detail-access">Model source · {unavailable}</span>}</div>
       <div className="model-detail-grid"><section className="model-detail-group"><h3>Provider pricing <small>per 1M tokens</small></h3>{input && <DetailRow label="Input" value={input} />}{cachedInput && <DetailRow label="Cached input" value={cachedInput} />}{output && <DetailRow label="Output" value={output} />}{!input && !cachedInput && !output && <DetailRow label="Pricing" value={unavailable} />}</section>
-        {model.contextLength && model.contextLength > 0 && <section className="model-detail-group"><h3>Context window</h3><DetailRow label="Context window" value={`${model.contextLength.toLocaleString()} tokens`} /></section>}
-        <section className="model-detail-group"><h3>Capabilities</h3><DetailRow label="Input modalities" value={model.architecture?.inputModalities?.length ? model.architecture.inputModalities.join(" · ") : unavailable} /><DetailRow label="Output modalities" value={model.architecture?.outputModalities?.length ? model.architecture.outputModalities.join(" · ") : unavailable} /><DetailRow label="Supported parameters" value={model.supportedParameters?.length ? model.supportedParameters.join(" · ") : unavailable} /></section></div>
+        <section className="model-detail-group"><h3>Capabilities</h3><DetailRow label="Context window" value={context ?? notAvailable} /><DetailRow label="Tools" value={capabilityText(model.toolsSupport)} /><DetailRow label="Vision" value={capabilityText(model.visionSupport)} /></section>
+        <section className="model-detail-group"><h3>Modalities <small>provider catalog</small></h3><DetailRow label="Input" value={model.architecture?.inputModalities?.length ? model.architecture.inputModalities.join(" · ") : notAvailable} /><DetailRow label="Output" value={model.architecture?.outputModalities?.length ? model.architecture.outputModalities.join(" · ") : notAvailable} /><DetailRow label="Parameters" value={model.supportedParameters?.length ? model.supportedParameters.join(" · ") : notAvailable} /></section></div>
+      {model.capabilitySource === "cached" && <p className="model-modal-note">The live provider catalog could not be reached, so the last verified feature metadata is shown.</p>}
       <section className="model-quickstart" aria-labelledby="model-endpoint-heading"><h3 id="model-endpoint-heading">Openweight chat-completions API</h3><p>Supported first-party OpenAI-compatible endpoint. Authenticate with an Openweight API key and use the model identifier shown above.</p><div className="model-endpoint-row"><code>POST {endpoint}</code><CopyButton value={endpoint} label="chat-completions endpoint path" onCopied={onCopied} /></div><div className="model-code-heading"><span>QUICKSTART · cURL</span><CopyButton value={quickstart} label="chat-completions example" onCopied={onCopied} /></div><pre className="model-code"><code>{quickstart}</code></pre></section>
       <div className="model-modal-footer">{operational(model) ? <button type="button" className="model-use-button" onClick={onUse}>Try in Playground <span aria-hidden="true">→</span></button> : <p className="model-modal-note">This model is {status.toLowerCase()}. It cannot be used in the Playground until provider availability is restored.</p>}</div>
     </div></section></div>;

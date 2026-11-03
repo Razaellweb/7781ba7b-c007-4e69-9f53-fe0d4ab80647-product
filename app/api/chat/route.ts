@@ -8,6 +8,7 @@ import { getActiveModel, pickAutoModel, syncCuratedModels, type ModelRow } from 
 import { computeUserDebit, modelPolicy } from "../../../lib/server/pricing";
 import { pricingConfig, userRateLimit } from "../../../lib/server/config";
 import { ensureMigrated } from "../../../lib/server/migrate";
+import { requireActiveAccountKey, ApiKeyError, type ActiveAccountKey } from "../../../lib/server/api-keys";
 import type { InferenceMessage, CompletionParameters } from "../../../lib/server/inference";
 
 const encoder = new TextEncoder();
@@ -42,6 +43,23 @@ export async function POST(request: Request) {
     const body = await request.json() as Record<string, unknown>;
     const text = typeof body.message === "string" ? body.message.trim() : "";
     if (!text) return NextResponse.json({ error: "Message cannot be empty", code: "INVALID_REQUEST", requestId }, { status: 400 });
+    // The Playground requires an active API key on the signed-in account. When the
+    // request is presented as a first-party key, authenticateRequest has already
+    // verified hash, ownership and revocation for it. For a Privy session the key
+    // is looked up in the database here, so a client-supplied key id that belongs
+    // to another account, a revoked key, or a keyless session is rejected before
+    // any conversation, inference record, or provider work is created.
+    let authorizingKey: ActiveAccountKey | null = null;
+    if (!account.apiKeyId) {
+      try {
+        const requestedKeyId = typeof body.apiKeyId === "string" ? body.apiKeyId : request.headers.get("x-openweight-api-key-id");
+        authorizingKey = await requireActiveAccountKey(account.accountId, requestedKeyId);
+      } catch (error) {
+        if (error instanceof ApiKeyError) return NextResponse.json({ error: error.message, code: error.code, requiresApiKey: true, requestId }, { status: error.status });
+        throw error;
+      }
+    }
+    const authorizingApiKeyId = account.apiKeyId ?? authorizingKey?.id ?? null;
     const clientRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId.trim() || null : null;
     await syncCuratedModels();
     const requestedSlug = typeof body.model === "string" ? body.model.trim() : "";
@@ -59,7 +77,7 @@ export async function POST(request: Request) {
     const duplicate = await query<{ id: string; status: string; conversation_id: string }>(`SELECT id,status,conversation_id FROM inference_records WHERE operation_key=$1 OR ($2::text IS NOT NULL AND account_id=$3 AND client_request_id=$2) LIMIT 1`, [operationKey, clientRequestId, account.accountId]);
     if (duplicate[0]) return NextResponse.json({ error: "This inference request has already been accepted", code: "DUPLICATE_REQUEST", requestId, operationKey, status: duplicate[0].status, conversationId: duplicate[0].conversation_id }, { status: 409 });
     const cfg = pricingConfig(); const policy = modelPolicy(model); const channel = isApiKey ? "api_key" : "app";
-    const claimed = await query<{ id: string; status: string; conversation_id: string }>(`INSERT INTO inference_records (account_id, operation_key, provider, model, provider_model, conversation_id, status, markup_micro, metadata, api_key_id, channel, client_request_id) VALUES ($1,$2,$3,$4,$5,$6,'started',$7,$8,$9,$10,$11) ON CONFLICT (operation_key) DO NOTHING RETURNING id,status,conversation_id`, [account.accountId, operationKey, model.provider, model.slug, model.provider_model_slug, conversationId, policy.markupMicro.toString(), JSON.stringify({ requestId, channel, apiKeyId: account.apiKeyId ?? null, parameters }), account.apiKeyId ?? null, channel, clientRequestId]);
+    const claimed = await query<{ id: string; status: string; conversation_id: string }>(`INSERT INTO inference_records (account_id, operation_key, provider, model, provider_model, conversation_id, status, markup_micro, metadata, api_key_id, channel, client_request_id) VALUES ($1,$2,$3,$4,$5,$6,'started',$7,$8,$9,$10,$11) ON CONFLICT (operation_key) DO NOTHING RETURNING id,status,conversation_id`, [account.accountId, operationKey, model.provider, model.slug, model.provider_model_slug, conversationId, policy.markupMicro.toString(), JSON.stringify({ requestId, channel, apiKeyId: authorizingApiKeyId, parameters }), authorizingApiKeyId, channel, clientRequestId]);
     if (!claimed[0]) return NextResponse.json({ error: "This inference request has already been accepted", code: "DUPLICATE_REQUEST", requestId, operationKey, conversationId }, { status: 409 });
     const inferenceId = claimed[0].id;
     const priorRows = await query<{ role: "user" | "assistant"; content: string }>(`SELECT role, content FROM messages WHERE conversation_id=$1 AND partial=false ORDER BY created_at ASC LIMIT $2`, [conversationId, CONTEXT_LIMIT]);
@@ -72,7 +90,7 @@ export async function POST(request: Request) {
       // default grant is provisioned for any verified identity, and it never
       // depends on token holdings or a legacy holder-status value.
       await ensureDefaultAllowance(account.accountId);
-      await reserveCompute(account.accountId, operationKey, cfg.reservationCapMicroUsd, { apiKeyId: account.apiKeyId, channel });
+      await reserveCompute(account.accountId, operationKey, cfg.reservationCapMicroUsd, { apiKeyId: authorizingApiKeyId ?? undefined, channel });
     } catch (error) { if (error instanceof AccountingError) { const status = error.code === "ALLOWANCE_MISSING" || error.code === "ALLOWANCE_EXPIRED" ? 403 : 402; return NextResponse.json({ error: error.message, code: error.code, requestId }, { status }); } throw error; }
     const provider = getInferenceProvider();
     const stream = new ReadableStream({ async start(controller) { let output = ""; let settled = false; let deltas = 0; let stopRequested = false; const send = (obj: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); const finalize = async (status: "complete" | "cancelled" | "failed" | "uncertain", providerCost: bigint | null, usage: { inputTokens: number | null; outputTokens: number | null } | null, uncertain: boolean) => { if (settled) return; const correlationId = `${requestId}:${inferenceId}`; const userDebit = providerCost != null && !uncertain ? computeUserDebit(providerCost, policy) : 0n; const cappedDebit = userDebit > cfg.reservationCapMicroUsd ? cfg.reservationCapMicroUsd : userDebit; const isUncertain = uncertain || (status !== "complete" && providerCost == null && output.length > 0); try { await settleReservation(operationKey, cappedDebit, providerCost, isUncertain, { inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens, eventType: status === "complete" ? "provider_usage" : status === "cancelled" ? "cancelled" : status === "failed" ? "provider_failure" : "uncertain", markupMicro: policy.markupMicro }); } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "settlement", error); throw error; } try { if (output) await query(`INSERT INTO messages (inference_id,conversation_id,account_id,role,content,partial,model_slug,provider_model,input_tokens,output_tokens,provider_cost_micro_usd,user_debit_micro_usd) VALUES ($1,$2,$3,'assistant',$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (inference_id) WHERE role='assistant' DO NOTHING`, [inferenceId, conversationId, account.accountId, output, status !== "complete", model.slug, model.provider_model_slug, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString()]); } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "assistant_persistence", error); throw error; } try { await query(`UPDATE inference_records SET status=$2, input_tokens=$3, output_tokens=$4, provider_cost_micro_usd=$5, user_debit_micro_usd=$6, reconciliation_required=$7, completed_at=now() WHERE operation_key=$1`, [operationKey, status, usage?.inputTokens ?? null, usage?.outputTokens ?? null, providerCost?.toString() ?? null, cappedDebit.toString(), isUncertain]); await query(`UPDATE conversations SET updated_at=now() WHERE id=$1`, [conversationId]); } catch (error) { await reportFinalizationFailure(operationKey, correlationId, "inference_update", error); throw error; } settled = true; };

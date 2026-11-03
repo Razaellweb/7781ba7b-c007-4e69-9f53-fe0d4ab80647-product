@@ -22,8 +22,10 @@ export async function GET(request: Request) {
       `SELECT state, chain_id, wallet_address, balance_raw, threshold_raw, token_decimals, verified_at FROM holder_eligibility WHERE account_id=$1 ORDER BY verified_at DESC LIMIT 1`,
       [account.accountId]
     );
+    // Credited funding deposits are positive ledger entries, so they raise the
+    // available compute reported here alongside grants, releases, and refunds.
     const balance = await query<{ available: string; reserved: string }>(
-      `SELECT COALESCE(SUM(CASE WHEN entry_type IN ('grant','release','refund') THEN amount_micro_usd WHEN entry_type IN ('reservation','user_debit') THEN -amount_micro_usd ELSE 0 END),0)::text available,
+      `SELECT COALESCE(SUM(CASE WHEN entry_type IN ('grant','release','refund','deposit','adjustment') THEN amount_micro_usd WHEN entry_type IN ('reservation','user_debit') THEN -amount_micro_usd ELSE 0 END),0)::text available,
               COALESCE((SELECT SUM(reserved_micro_usd-settled_micro_usd) FROM compute_reservations WHERE account_id=$1 AND status='reserved'),0)::text reserved
          FROM compute_ledger_entries WHERE account_id=$1`,
       [account.accountId]
