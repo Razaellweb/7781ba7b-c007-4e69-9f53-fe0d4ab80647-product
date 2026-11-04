@@ -71,12 +71,13 @@ const FUNDING_CONFIRMATIONS_DEFAULT = 3;
 export const FUNDING_TOKEN_SYMBOL_USDG = "USDG";
 
 /**
- * Address supplied for verification against Robinhood's own documentation. It is
- * recorded here as an UNVERIFIED candidate only: `USDG_NETWORK_REGISTRY` below
- * keeps it inert until an operator confirms it against official sources, so the
- * funding path stays closed rather than enabling a guessed address.
+ * USDG on Robinhood Chain mainnet. Verified 2026-11-04: Paxos (the issuer) lists
+ * it as the Robinhood Mainnet token address (docs.paxos.com/guides/stablecoin/
+ * usdg/mainnet), and the contract on chain 4663 reports name "Global Dollar",
+ * symbol "USDG" and 6 decimals.
  */
-export const USDG_UNVERIFIED_MAINNET_CANDIDATE = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+export const USDG_MAINNET_ADDRESS = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+export const USDG_MAINNET_DECIMALS = 6;
 
 /**
  * Per-network USDG configuration. Addresses are NEVER shared between networks:
@@ -108,19 +109,18 @@ export type UsdgNetworkRegistry = Record<number, UsdgNetworkEntry>;
 export const ROBINHOOD_MAINNET_CHAIN_ID = 4663;
 export const ROBINHOOD_TESTNET_CHAIN_ID = 46630;
 
-// Official verification for USDG on Robinhood Chain was NOT available when this
-// configuration was written, so both networks ship unverified and therefore
-// closed. Flip `verified`/`tokenAddress`/`tokenDecimals` (and record
-// `verificationSource`) only after confirming the values in official docs.
+// Mainnet USDG is verified (see USDG_MAINNET_ADDRESS). Testnet has no verified
+// USDG deployment, so funding stays closed there. Flip an entry only after
+// confirming its address and decimals in official docs, and record the source.
 export const USDG_NETWORK_REGISTRY: UsdgNetworkRegistry = {
   [ROBINHOOD_MAINNET_CHAIN_ID]: {
     chainId: ROBINHOOD_MAINNET_CHAIN_ID,
     chainName: "Robinhood Chain Mainnet",
-    tokenAddress: null,
-    tokenDecimals: null,
-    verified: false,
-    verificationSource: null,
-    pendingVerificationAddress: USDG_UNVERIFIED_MAINNET_CANDIDATE,
+    tokenAddress: USDG_MAINNET_ADDRESS,
+    tokenDecimals: USDG_MAINNET_DECIMALS,
+    verified: true,
+    verificationSource: "Paxos USDG mainnet docs (docs.paxos.com/guides/stablecoin/usdg/mainnet) + on-chain name/symbol/decimals read on chain 4663, 2026-11-04",
+    pendingVerificationAddress: null,
     confirmations: FUNDING_CONFIRMATIONS_DEFAULT,
   },
   [ROBINHOOD_TESTNET_CHAIN_ID]: {

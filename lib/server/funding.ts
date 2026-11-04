@@ -1,3 +1,4 @@
+import { availableComputeMicroUsd } from "./accounting";
 import { PrivyClient } from "@privy-io/server-auth";
 import { fundingConfig, fundingReconcileConfig, privyConfig, privyWalletConfig, FUNDING_TOKEN_SYMBOL_USDG, type FundingConfig } from "./config";
 import {
@@ -737,11 +738,7 @@ export async function recoverFunding(limit = 25): Promise<{
 
 /** Available compute balance in micro-USD, using the canonical ledger convention. */
 async function availableMicroUsd(accountId: string): Promise<string> {
-  const rows = await query<{ available: string }>(
-    `SELECT GREATEST(COALESCE(SUM(CASE WHEN entry_type IN ('grant','release','refund','deposit','adjustment') THEN amount_micro_usd WHEN entry_type IN ('reservation','user_debit') THEN -amount_micro_usd ELSE 0 END),0),0)::text available FROM compute_ledger_entries WHERE account_id=$1`,
-    [accountId]
-  );
-  return rows[0]?.available ?? "0";
+  return (await availableComputeMicroUsd(accountId)).toString();
 }
 
 /** Browser-safe funding state. No Privy ids, no webhook internals, no secrets. */

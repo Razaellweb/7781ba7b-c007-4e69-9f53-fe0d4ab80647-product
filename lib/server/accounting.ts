@@ -1,7 +1,18 @@
-import { transaction } from "./db";
+import { query, transaction } from "./db";
 import { allowanceConfig } from "./config";
 
 export type MicroUsd = bigint;
+
+// The one definition of spendable compute. Grants count only inside their period;
+// releases, refunds, credited deposits and adjustments count once recorded; holds
+// and debits subtract. reserveCompute and every balance display use this, so the
+// workspace shows exactly what can be spent.
+export const AVAILABLE_BALANCE_SQL = `SELECT GREATEST(COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund','deposit','adjustment') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`;
+
+export async function availableComputeMicroUsd(accountId: string): Promise<bigint> {
+  const rows = await query<{ available: string }>(AVAILABLE_BALANCE_SQL, [accountId]);
+  return BigInt(rows[0]?.available ?? "0");
+}
 export type AccountingChannel = "app" | "api_key" | "gpu";
 export class AccountingError extends Error { readonly code: string; constructor(message: string, code = "ACCOUNTING_ERROR") { super(message); this.code = code; } }
 
@@ -57,7 +68,7 @@ export async function reserveCompute(accountId: string, operationKey: string, es
     // adjustment) is usable as soon as it is recorded. Deposits are the only value
     // source that can fund an account, so an unfunded account has no balance to
     // spend from and is rejected here rather than being extended a placeholder.
-    const balance = await db.query<{ available: string }>(`SELECT GREATEST(COALESCE(SUM(CASE WHEN e.entry_type='grant' AND g.period_end > now() THEN e.amount_micro_usd WHEN e.entry_type IN ('release','refund','deposit','adjustment') THEN e.amount_micro_usd WHEN e.entry_type IN ('reservation','user_debit') THEN -e.amount_micro_usd ELSE 0 END),0),0)::text available FROM compute_ledger_entries e LEFT JOIN compute_grants g ON g.id=e.grant_id WHERE e.account_id=$1`, [accountId]);
+    const balance = await db.query<{ available: string }>(AVAILABLE_BALANCE_SQL, [accountId]);
     const available = BigInt(balance.rows[0]?.available ?? "0");
     if (available <= 0n) throw new AccountingError("No compute balance is available. Fund the wallet to add compute", "ALLOWANCE_MISSING");
     if (available < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
