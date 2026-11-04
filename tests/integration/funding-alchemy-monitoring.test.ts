@@ -245,9 +245,10 @@ const ENV = {
   ALCHEMY_WEBHOOK_ID: "wh_test",
 };
 
-// The shipped registry deliberately carries USDG as unverified for Robinhood Chain,
-// so the tests supply a verified registry entry for the active network rather than
-// editing production configuration (which would open funding on a guessed address).
+// The registry the funding module is evaluated against in this file. It mirrors the
+// shipped USDG_NETWORK_REGISTRY's verified Robinhood Chain mainnet (4663) entry, so
+// the default-config path (no chain env) resolves to mainnet USDG exactly as it does
+// in production; supplying it here keeps the suite independent of future registry edits.
 const verifiedRegistry = {
   4663: {
     chainId: 4663,

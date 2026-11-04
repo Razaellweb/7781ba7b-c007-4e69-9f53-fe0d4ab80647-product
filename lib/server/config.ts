@@ -44,17 +44,29 @@ export function vastConfig() { const raw = optional("VAST_API_KEY"); const apiKe
 /* ==========================================================================
    Funding (USDG deposit -> compute balance)
 
-   The funding asset is USDG on a Robinhood Chain network, and nothing else. Every
-   value is read from the server environment: this module never invents a chain
-   id, an address, or a decimal count. If anything required is absent, malformed,
-   not EIP-55 checksummed, or not the verified USDG contract for the *active*
-   network, the funding surface reports itself as unconfigured (fail closed) with
-   an explicit reason instead of guessing.
+   The funding asset is USDG on a Robinhood Chain network, and nothing else.
 
-   There is deliberately NO HOLDER_TOKEN_ADDRESS fallback any more: the funding
-   asset is configured explicitly with FUNDING_TOKEN_ADDRESS,
-   FUNDING_TOKEN_SYMBOL=USDG and FUNDING_TOKEN_DECIMALS, so an unrelated holder
-   token can never be credited by accident.
+   Defaults come ONLY from the verified USDG registry entry for the active chain:
+   `USDG_NETWORK_REGISTRY[chainId]` supplies the token address and decimals (and
+   USDG is the only symbol) when and only when that entry exists and `verified` is
+   true. An unverified entry is never used as a fallback, so funding stays closed
+   on a network whose USDG deployment nobody has confirmed.
+
+   The active chain is resolved in the order FUNDING_CHAIN_ID, ROBINHOOD_CHAIN_ID,
+   NEXT_PUBLIC_ROBINHOOD_CHAIN_ID, defaulting to Robinhood Chain mainnet (4663)
+   only when none of them is set. A value that IS set but is unusable (nonnumeric,
+   not a positive integer, or not a known funding network) fails closed instead of
+   silently falling back to the default.
+
+   An explicit FUNDING_TOKEN_ADDRESS / FUNDING_TOKEN_DECIMALS / FUNDING_TOKEN_SYMBOL
+   still wins over the registry default, but it must survive the same validation as
+   before: EIP-55 checksummed, the verified USDG contract for the active network,
+   decimals an integer in 0..36 that matches the registry entry, and the symbol
+   USDG. Anything else reports itself unconfigured (fail closed) with an explicit
+   reason instead of guessing.
+
+   There is deliberately NO HOLDER_TOKEN_ADDRESS fallback: an unrelated holder token
+   can never be credited by accident.
 
    Deposit credit uses this project's existing compute ledger convention: balances
    are integer micro-USD (`compute_ledger_entries.amount_micro_usd`). USDG is a
@@ -108,6 +120,13 @@ export type UsdgNetworkRegistry = Record<number, UsdgNetworkEntry>;
 
 export const ROBINHOOD_MAINNET_CHAIN_ID = 4663;
 export const ROBINHOOD_TESTNET_CHAIN_ID = 46630;
+
+/** Network used when no chain-selection variable is present at all. */
+export const DEFAULT_FUNDING_CHAIN_ID = ROBINHOOD_MAINNET_CHAIN_ID;
+
+// Chain-selection precedence: the first variable that is SET wins, even if its
+// value turns out to be unusable (an explicit bad value never silently falls back).
+const FUNDING_CHAIN_ENV_NAMES = ["FUNDING_CHAIN_ID", "ROBINHOOD_CHAIN_ID", "NEXT_PUBLIC_ROBINHOOD_CHAIN_ID"] as const;
 
 // Mainnet USDG is verified (see USDG_MAINNET_ADDRESS). Testnet has no verified
 // USDG deployment, so funding stays closed there. Flip an entry only after
@@ -176,41 +195,55 @@ export function fundingConfig(options: { networkRegistry?: UsdgNetworkRegistry }
   const supported = Object.values(registry).map((entry) => `${entry.chainId} (${entry.chainName})`).join(", ");
   const issues: string[] = [];
 
-  // 1) Active network. Only a supported Robinhood Chain network can be funded.
-  const chainRaw = optional("FUNDING_CHAIN_ID") ?? optional("ROBINHOOD_CHAIN_ID") ?? optional("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID");
+  // 1) Active network. FUNDING_CHAIN_ID beats ROBINHOOD_CHAIN_ID beats
+  //    NEXT_PUBLIC_ROBINHOOD_CHAIN_ID; the default applies only when none is set.
+  const selectedChain = FUNDING_CHAIN_ENV_NAMES
+    .map((name) => [name, optional(name)] as const)
+    .find(([, value]) => value !== undefined);
   let chainId = 0;
-  if (!chainRaw) {
-    issues.push("FUNDING_CHAIN_ID is not set");
+  if (!selectedChain) {
+    // No chain was chosen at all: use the default network. It is still required to
+    // exist in the registry, so this can never resolve to an empty asset.
+    if (registry[DEFAULT_FUNDING_CHAIN_ID]) chainId = DEFAULT_FUNDING_CHAIN_ID;
+    else issues.push(`FUNDING_CHAIN_ID is not set and the default chain ${DEFAULT_FUNDING_CHAIN_ID} is not a supported USDG funding network (supported: ${supported})`);
   } else {
+    const [name, chainRaw] = selectedChain;
     const parsed = Number(chainRaw);
-    if (!Number.isInteger(parsed) || parsed <= 0) issues.push(`FUNDING_CHAIN_ID is not a positive integer chain id: ${chainRaw}`);
-    else if (!registry[parsed]) issues.push(`FUNDING_CHAIN_ID ${parsed} is not a supported USDG funding network (supported: ${supported})`);
+    if (!Number.isInteger(parsed) || parsed <= 0) issues.push(`${name} is not a positive integer chain id: ${chainRaw}`);
+    else if (!registry[parsed]) issues.push(`${name} ${parsed} is not a supported USDG funding network (supported: ${supported})`);
     else chainId = parsed;
   }
   const entry = chainId ? registry[chainId] : undefined;
   const chainName = entry?.chainName ?? optional("FUNDING_CHAIN_NAME") ?? "Robinhood Chain";
 
-  // 2) Asset symbol. USDG is the only creditable asset.
-  const symbolRaw = optional("FUNDING_TOKEN_SYMBOL");
-  if (!symbolRaw) issues.push(`FUNDING_TOKEN_SYMBOL is not set (must be ${FUNDING_TOKEN_SYMBOL_USDG})`);
-  else if (symbolRaw.toUpperCase() !== FUNDING_TOKEN_SYMBOL_USDG) issues.push(`FUNDING_TOKEN_SYMBOL is ${symbolRaw}; deposits are credited in ${FUNDING_TOKEN_SYMBOL_USDG} only`);
+  // A registry entry is only usable as a source of defaults when it is verified AND
+  // actually carries an address and decimals. An unverified entry is NEVER used.
+  const verifiedEntry = entry && entry.verified && entry.tokenAddress && entry.tokenDecimals !== null ? entry : undefined;
 
-  // 3) Decimals. Explicit, never defaulted: guessing scale mis-prices every deposit.
+  // 2) Asset symbol. USDG is the only creditable asset, and the default.
+  const symbolRaw = optional("FUNDING_TOKEN_SYMBOL");
+  if (symbolRaw !== undefined && symbolRaw.toUpperCase() !== FUNDING_TOKEN_SYMBOL_USDG) {
+    issues.push(`FUNDING_TOKEN_SYMBOL is ${symbolRaw}; deposits are credited in ${FUNDING_TOKEN_SYMBOL_USDG} only`);
+  }
+
+  // 3) Decimals. An explicit value wins, otherwise the verified registry value for
+  //    the active network is used. Nothing is guessed for an unverified network.
   const decimalsRaw = optional("FUNDING_TOKEN_DECIMALS");
   let tokenDecimals = 0;
-  if (!decimalsRaw) {
-    issues.push(`FUNDING_TOKEN_DECIMALS is not set (USDG's decimals on ${chainName} must be configured explicitly)`);
+  if (decimalsRaw === undefined) {
+    if (verifiedEntry) tokenDecimals = verifiedEntry.tokenDecimals as number;
   } else {
     const parsed = Number(decimalsRaw);
     if (!Number.isInteger(parsed) || parsed < 0 || parsed > 36) issues.push(`FUNDING_TOKEN_DECIMALS is not an integer between 0 and 36: ${decimalsRaw}`);
     else tokenDecimals = parsed;
   }
 
-  // 4) Address. Explicit only: no holder-token fallback exists any more.
+  // 4) Address. An explicit value wins, otherwise the verified registry address for
+  //    the active network is used. There is no other fallback.
   const addressRaw = optional("FUNDING_TOKEN_ADDRESS");
   let tokenAddress = "";
-  if (!addressRaw) {
-    issues.push(`FUNDING_TOKEN_ADDRESS is not set; the USDG contract on ${chainName} must be configured explicitly (there is no HOLDER_TOKEN_ADDRESS fallback)`);
+  if (addressRaw === undefined) {
+    if (verifiedEntry) tokenAddress = verifiedEntry.tokenAddress as string;
   } else {
     const parsed = checksummedAddress(addressRaw);
     if ("error" in parsed) issues.push(`FUNDING_TOKEN_ADDRESS ${parsed.error}: ${addressRaw}`);
@@ -218,17 +251,17 @@ export function fundingConfig(options: { networkRegistry?: UsdgNetworkRegistry }
   }
 
   // 5) Network-specific verification. An address is only usable on the network it
-  //    was verified for; an unverified entry keeps funding closed.
-  if (entry && tokenAddress) {
-    if (!entry.verified || !entry.tokenAddress || entry.tokenDecimals === null) {
+  //    was verified for; an unverified or unknown entry keeps funding closed.
+  if (entry) {
+    if (!verifiedEntry) {
       const candidate = entry.pendingVerificationAddress ? ` The supplied candidate ${entry.pendingVerificationAddress} is unverified; confirm USDG's address and decimals for ${entry.chainName} (chain id ${entry.chainId}) against official Robinhood Chain documentation before enabling it.` : "";
       issues.push(`USDG is not verified for ${entry.chainName} (chain id ${entry.chainId}), so funding is closed.${candidate}`);
-    } else {
-      if (entry.tokenAddress.toLowerCase() !== tokenAddress.toLowerCase()) {
-        issues.push(`FUNDING_TOKEN_ADDRESS ${tokenAddress} is not the verified USDG contract ${entry.tokenAddress} on ${entry.chainName} (chain id ${entry.chainId})`);
+    } else if (tokenAddress) {
+      if (verifiedEntry.tokenAddress!.toLowerCase() !== tokenAddress.toLowerCase()) {
+        issues.push(`FUNDING_TOKEN_ADDRESS ${tokenAddress} is not the verified USDG contract ${verifiedEntry.tokenAddress} on ${entry.chainName} (chain id ${entry.chainId})`);
       }
-      if (tokenDecimals !== entry.tokenDecimals) {
-        issues.push(`FUNDING_TOKEN_DECIMALS is ${tokenDecimals} but USDG uses ${entry.tokenDecimals} decimals on ${entry.chainName}`);
+      if (tokenDecimals !== verifiedEntry.tokenDecimals) {
+        issues.push(`FUNDING_TOKEN_DECIMALS is ${tokenDecimals} but USDG uses ${verifiedEntry.tokenDecimals} decimals on ${entry.chainName}`);
       }
       for (const other of Object.values(registry)) {
         if (other.chainId === entry.chainId) continue;

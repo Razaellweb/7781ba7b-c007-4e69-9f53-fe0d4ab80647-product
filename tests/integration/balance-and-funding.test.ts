@@ -1,12 +1,57 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { fundingConfig, USDG_MAINNET_ADDRESS } from "../../lib/server/config";
+import { afterEach, beforeAll, beforeEach, afterAll, describe, expect, it, vi } from "vitest";
+import { fundingConfig, USDG_MAINNET_ADDRESS, USDG_MAINNET_DECIMALS } from "../../lib/server/config";
 
 // Balance is only what an account can spend: credited deposits count, grants
 // count only inside their period, and the free monthly allowance is gone.
 
+// Every funding/chain variable the configuration reads. A deployment (or a local
+// .env fixture) that carries any of these must not be allowed to leak into a test
+// that is supposed to exercise the defaults, so each case starts from "cleared"
+// (an empty value is treated as absent by the config helpers) and only the values a
+// given case genuinely wants are stubbed afterwards.
+const FUNDING_ENV_NAMES = [
+  "FUNDING_CHAIN_ID",
+  "FUNDING_TOKEN_SYMBOL",
+  "FUNDING_TOKEN_DECIMALS",
+  "FUNDING_TOKEN_ADDRESS",
+  "ROBINHOOD_CHAIN_ID",
+  "NEXT_PUBLIC_ROBINHOOD_CHAIN_ID",
+] as const;
+
+function clearFundingEnv() {
+  for (const name of FUNDING_ENV_NAMES) vi.stubEnv(name, "");
+}
+
 describe("USDG funding configuration", () => {
+  beforeEach(() => {
+    clearFundingEnv();
+  });
+
+  afterEach(() => {
+    // Restores the real environment that clearFundingEnv()/vi.stubEnv() replaced.
+    vi.unstubAllEnvs();
+  });
+
+  // INTENTIONAL BEHAVIOUR CHANGE (please review): this configuration used to report
+  // configured:false with no funding env at all. It now resolves chain 4663 and the
+  // verified USDG entry from USDG_NETWORK_REGISTRY, so funding is open on Robinhood
+  // Chain mainnet by default. All six funding/chain variables are explicitly cleared
+  // below so a .env fixture value can never accidentally stand in for the default.
+  it("resolves the verified mainnet USDG defaults when no funding or chain env is set", () => {
+    const cfg = fundingConfig();
+    expect(cfg.issues).toEqual([]);
+    expect(cfg.configured).toBe(true);
+    expect(cfg.chainId).toBe(4663);
+    expect(cfg.tokenAddress).toBe("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
+    expect(cfg.tokenAddressLower).toBe("0x5fc5360d0400a0fd4f2af552add042d716f1d168");
+    expect(cfg.tokenAddressLower).toBe(cfg.tokenAddress.toLowerCase());
+    expect(cfg.tokenSymbol).toBe("USDG");
+    expect(cfg.tokenDecimals).toBe(6);
+    expect(cfg.unconfiguredReason).toBeNull();
+  });
+
   it("opens funding on Robinhood Chain mainnet with the verified USDG settings", () => {
     vi.stubEnv("FUNDING_CHAIN_ID", "4663");
     vi.stubEnv("FUNDING_TOKEN_SYMBOL", "USDG");
@@ -15,7 +60,98 @@ describe("USDG funding configuration", () => {
     const cfg = fundingConfig();
     expect(cfg.issues).toEqual([]);
     expect(cfg.configured).toBe(true);
-    vi.unstubAllEnvs();
+    expect(cfg.chainId).toBe(4663);
+    expect(cfg.tokenAddress).toBe(USDG_MAINNET_ADDRESS);
+    expect(cfg.tokenAddressLower).toBe(USDG_MAINNET_ADDRESS.toLowerCase());
+    expect(cfg.tokenDecimals).toBe(USDG_MAINNET_DECIMALS);
+    expect(cfg.tokenSymbol).toBe("USDG");
+  });
+
+  it("resolves the chain in FUNDING_CHAIN_ID, ROBINHOOD_CHAIN_ID, NEXT_PUBLIC_ROBINHOOD_CHAIN_ID order", () => {
+    vi.stubEnv("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID", "46630");
+    vi.stubEnv("ROBINHOOD_CHAIN_ID", "46630");
+    vi.stubEnv("FUNDING_CHAIN_ID", "4663");
+    expect(fundingConfig().chainId).toBe(4663);
+
+    clearFundingEnv();
+    vi.stubEnv("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID", "46630");
+    vi.stubEnv("ROBINHOOD_CHAIN_ID", "4663");
+    expect(fundingConfig().chainId).toBe(4663);
+
+    clearFundingEnv();
+    vi.stubEnv("NEXT_PUBLIC_ROBINHOOD_CHAIN_ID", "4663");
+    expect(fundingConfig().chainId).toBe(4663);
+  });
+
+  it("fails closed on a nonnumeric or unknown chain id instead of falling back", () => {
+    vi.stubEnv("FUNDING_CHAIN_ID", "robinhood");
+    const nonNumeric = fundingConfig();
+    expect(nonNumeric.configured).toBe(false);
+    expect(nonNumeric.chainId).toBe(0);
+    expect(nonNumeric.issues.join(" ")).toMatch(/FUNDING_CHAIN_ID is not a positive integer chain id: robinhood/);
+
+    clearFundingEnv();
+    vi.stubEnv("ROBINHOOD_CHAIN_ID", "999");
+    const unknown = fundingConfig();
+    expect(unknown.configured).toBe(false);
+    expect(unknown.issues.join(" ")).toMatch(/ROBINHOOD_CHAIN_ID 999 is not a supported USDG funding network/);
+  });
+
+  it("keeps funding closed for the unverified testnet chain", () => {
+    vi.stubEnv("FUNDING_CHAIN_ID", "46630");
+    const cfg = fundingConfig();
+    expect(cfg.configured).toBe(false);
+    expect(cfg.chainId).toBe(46630);
+    expect(cfg.tokenAddress).toBe("");
+    expect(cfg.tokenDecimals).toBe(0);
+    expect(cfg.issues.join(" ")).toMatch(/USDG is not verified for Robinhood Chain Testnet \(chain id 46630\)/);
+  });
+
+  it("never uses an unverified registry address as a fallback", () => {
+    vi.stubEnv("FUNDING_CHAIN_ID", "46630");
+    const cfg = fundingConfig({
+      networkRegistry: {
+        46630: {
+          chainId: 46630,
+          chainName: "Robinhood Chain Testnet",
+          tokenAddress: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+          tokenDecimals: 18,
+          verified: false,
+          verificationSource: null,
+          pendingVerificationAddress: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+          confirmations: 3,
+        },
+      },
+    });
+    expect(cfg.configured).toBe(false);
+    expect(cfg.tokenAddress).toBe("");
+    expect(cfg.tokenDecimals).toBe(0);
+    expect(cfg.issues.join(" ")).toMatch(/USDG is not verified for Robinhood Chain Testnet/);
+  });
+
+  it("rejects a non-checksummed or mismatched explicit address", () => {
+    vi.stubEnv("FUNDING_TOKEN_ADDRESS", USDG_MAINNET_ADDRESS.toLowerCase());
+    const lower = fundingConfig();
+    expect(lower.configured).toBe(false);
+    expect(lower.issues.join(" ")).toMatch(/is not EIP-55 checksummed/);
+
+    clearFundingEnv();
+    vi.stubEnv("FUNDING_TOKEN_ADDRESS", "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34");
+    const other = fundingConfig();
+    expect(other.configured).toBe(false);
+    expect(other.issues.join(" ")).toMatch(/is not the verified USDG contract/);
+  });
+
+  it("rejects a checksummed address that differs from the registry entry", () => {
+    // Same network, valid EIP-55 checksum, but not the USDG contract USDG_NETWORK_REGISTRY
+    // carries for chain 4663: the override must lose to the verified entry.
+    vi.stubEnv("FUNDING_CHAIN_ID", "4663");
+    vi.stubEnv("FUNDING_TOKEN_ADDRESS", "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34");
+    const cfg = fundingConfig();
+    expect(cfg.configured).toBe(false);
+    expect(cfg.issues.join(" ")).toMatch(
+      /FUNDING_TOKEN_ADDRESS 0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34 is not the verified USDG contract 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168 on Robinhood Chain Mainnet \(chain id 4663\)/,
+    );
   });
 
   it("stays closed for wrong decimals or another token address", () => {
@@ -27,7 +163,77 @@ describe("USDG funding configuration", () => {
     expect(cfg.configured).toBe(false);
     expect(cfg.issues.join(" ")).toMatch(/not the verified USDG contract/);
     expect(cfg.issues.join(" ")).toMatch(/uses 6 decimals/);
-    vi.unstubAllEnvs();
+  });
+
+  it("rejects out-of-range decimals and non-USDG symbols", () => {
+    vi.stubEnv("FUNDING_TOKEN_DECIMALS", "37");
+    const decimals = fundingConfig();
+    expect(decimals.configured).toBe(false);
+    expect(decimals.issues.join(" ")).toMatch(/FUNDING_TOKEN_DECIMALS is not an integer between 0 and 36: 37/);
+
+    clearFundingEnv();
+    vi.stubEnv("FUNDING_TOKEN_DECIMALS", "-1");
+    const negative = fundingConfig();
+    expect(negative.configured).toBe(false);
+    expect(negative.issues.join(" ")).toMatch(/FUNDING_TOKEN_DECIMALS is not an integer between 0 and 36: -1/);
+
+    clearFundingEnv();
+    vi.stubEnv("FUNDING_TOKEN_DECIMALS", "6.5");
+    const fractional = fundingConfig();
+    expect(fractional.configured).toBe(false);
+    expect(fractional.issues.join(" ")).toMatch(/FUNDING_TOKEN_DECIMALS is not an integer between 0 and 36: 6.5/);
+
+    clearFundingEnv();
+    vi.stubEnv("FUNDING_TOKEN_SYMBOL", "USDC");
+    const symbol = fundingConfig();
+    expect(symbol.configured).toBe(false);
+    expect(symbol.issues.join(" ")).toMatch(/FUNDING_TOKEN_SYMBOL is USDC; deposits are credited in USDG only/);
+  });
+
+  it("fails closed when the default chain is missing from the registry", () => {
+    const cfg = fundingConfig({
+      networkRegistry: {
+        46630: {
+          chainId: 46630,
+          chainName: "Robinhood Chain Testnet",
+          tokenAddress: null,
+          tokenDecimals: null,
+          verified: false,
+          verificationSource: null,
+          pendingVerificationAddress: null,
+          confirmations: 3,
+        },
+      },
+    });
+    expect(cfg.configured).toBe(false);
+    expect(cfg.chainId).toBe(0);
+    expect(cfg.tokenAddress).toBe("");
+    expect(cfg.issues.join(" ")).toMatch(/the default chain 4663 is not a supported USDG funding network/);
+  });
+
+  it("resolves the defaults from a supplied registry that carries the verified 4663 entry", () => {
+    // The registry used by the deposit-monitoring suite is mocked with exactly this
+    // shape; the mock must keep the verified 4663 USDG entry so funding stays open.
+    const cfg = fundingConfig({
+      networkRegistry: {
+        4663: {
+          chainId: 4663,
+          chainName: "Robinhood Chain Mainnet",
+          tokenAddress: USDG_MAINNET_ADDRESS,
+          tokenDecimals: USDG_MAINNET_DECIMALS,
+          verified: true,
+          verificationSource: "test",
+          pendingVerificationAddress: null,
+          confirmations: 3,
+        },
+      },
+    });
+    expect(cfg.configured).toBe(true);
+    expect(cfg.chainId).toBe(4663);
+    expect(cfg.tokenAddress).toBe("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
+    expect(cfg.tokenAddressLower).toBe("0x5fc5360d0400a0fd4f2af552add042d716f1d168");
+    expect(cfg.tokenSymbol).toBe("USDG");
+    expect(cfg.tokenDecimals).toBe(6);
   });
 });
 
