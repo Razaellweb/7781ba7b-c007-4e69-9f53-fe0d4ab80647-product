@@ -2,14 +2,14 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePrivy, useUser } from "@privy-io/react-auth";
+import { usePrivy } from "@privy-io/react-auth";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import WorkspaceShell from "../../components/WorkspaceShell";
 import ModelLogo from "../../components/ModelLogo";
 import ModelCapabilities, { capabilityText, contextWindowLabel, type CapabilityModel } from "../../components/ModelCapabilities";
-import FundWalletDialog, { type FundAddressState } from "./FundWalletDialog";
-import { canonicalAddress, isEvmAddress, type CanonicalWalletCandidate } from "../../lib/wallet/canonical";
+import FundWalletDialog, { type FundAddressState, type FundDeposit } from "./FundWalletDialog";
+import { isEvmAddress } from "../../lib/wallet/canonical";
 import "./dashboard.css";
 import "./dashboard-overview.css";
 
@@ -18,6 +18,17 @@ type LoadState = "idle" | "loading" | "ready" | "error";
 type Activity = { operation_key: string; model: string; status: string; input_tokens: number | null; output_tokens: number | null; user_debit_micro_usd: string | null; created_at: string };
 type Model = CapabilityModel & { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; sourceUrl: string | null; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; licenseStatus: string; providerTermsStatus: string; availability: "available" | "unavailable" | "stale"; syncStatus: string };
 type AccountResponse = { account: { walletAddress: string | null } };
+type FundingResponse = {
+  configured: boolean;
+  error?: string;
+  chain: { id: number; name: string } | null;
+  token: { symbol: string } | null;
+  wallet: { address: string } | null;
+  monitoring: { watched: boolean } | null;
+  deposits: FundDeposit[];
+  requiredConfirmations: number;
+  minimumDeposit?: string | null;
+};
 type AllowanceResponse = { balance?: { available?: string }; allowance?: { amount_micro_usd?: string; period_end?: string } | null };
 
 const clampMicroUsd = (micro: string | null | undefined) => { try { const value = BigInt(micro ?? "0"); return value > 0n ? value : 0n; } catch { return 0n; } };
@@ -114,8 +125,7 @@ function ModelDetails({ model, onClose, onUse, onCopied }: { model: Model; onClo
 // the authenticated session. There is no ownership verification screen, gate
 // route, blocking modal, or holder check anywhere in this workspace.
 export default function DashboardPage() {
-  const { ready, authenticated, getAccessToken, logout, createWallet } = usePrivy();
-  const { user, refreshUser } = useUser();
+  const { ready, authenticated, getAccessToken, logout } = usePrivy();
   const router = useRouter();
   const [sessionState, setSessionState] = useState<SessionState>("loading");
   const [wallet, setWallet] = useState("");
@@ -130,7 +140,7 @@ export default function DashboardPage() {
   const [copyNotice, setCopyNotice] = useState("");
   const [autoModel, setAutoModel] = useState(false);
   // null = the Fund surface is closed. Every address the dialog renders comes
-  // from here, so it is always the backend-confirmed canonical wallet.
+  // from here, so it is always the monitored deposit wallet from the backend.
   const [fundState, setFundState] = useState<FundAddressState | null>(null);
   const [fundBusy, setFundBusy] = useState(false);
   const invokingControl = useRef<HTMLButtonElement | null>(null);
@@ -138,10 +148,6 @@ export default function DashboardPage() {
   // Monotonic id so a resolution that finishes after the surface was closed (or
   // re-triggered) can never write a stale address back into the dialog.
   const fundRequest = useRef(0);
-  const linkedWallets = useCallback(
-    () => (user?.linkedAccounts ?? []) as unknown as CanonicalWalletCandidate[],
-    [user],
-  );
   const authHeaders = useCallback(async () => { const token = await getAccessToken(); if (!token) throw new Error("No authenticated token"); return { Authorization: `Bearer ${token}` }; }, [getAccessToken]);
   const clearWorkspace = useCallback(() => { setComputeState("idle"); setActivity([]); setBalanceMicroUsd(null); setAllowanceMicroUsd(null); }, []);
   // The model list is public and identity-independent: every authenticated
@@ -177,7 +183,7 @@ export default function DashboardPage() {
       setSessionState("ready");
       setComputeState("loading");
       const [allowanceResponse, activityResponse] = await Promise.all([fetch("/api/allowance", { headers, cache: "no-store" }), fetch("/api/activity", { headers, cache: "no-store" })]);
-      if (!allowanceResponse.ok || !activityResponse.ok) { setComputeState("error"); setNotice("Compute data could not be loaded. Refresh to request fresh data."); return; }
+      if (!allowanceResponse.ok || !activityResponse.ok) { setComputeState("error"); setNotice("Compute data could not be loaded. Retry, or reload the page."); return; }
       const allowance = await allowanceResponse.json() as AllowanceResponse;
       const activityData = await activityResponse.json() as { activity?: Activity[] };
       setBalanceMicroUsd(allowance.balance?.available ?? null);
@@ -187,7 +193,7 @@ export default function DashboardPage() {
     } catch {
       clearWorkspace();
       setSessionState("error");
-      setNotice("The workspace service is temporarily unavailable. Refresh to request fresh data.");
+      setNotice("The workspace service is temporarily unavailable. Reload the page to try again.");
     } finally { loadingWorkspace.current = false; }
   }, [authenticated, authHeaders, clearWorkspace, loadRegistry]);
   const closeModelDetails = useCallback(() => { setSelectedModel(null); window.setTimeout(() => invokingControl.current?.focus(), 0); }, []);
@@ -221,72 +227,44 @@ export default function DashboardPage() {
       return next;
     });
   }, []);
-  const closeFund = useCallback(() => { fundRequest.current += 1; setFundState(null); setFundBusy(false); }, []);
-  // Fund resolves the account's canonical EVM wallet and shows it read-only.
-  //
-  // An address Privy already reports as linked renders immediately, so a reload
-  // reopens the existing wallet rather than provisioning anything. Only an
-  // identity with no EVM wallet at all provisions the embedded wallet, and the
-  // backend then confirms the canonical choice. No payment, checkout, or funding
-  // transaction is started from here.
+  // Closing refreshes compute, so a deposit credited while the dialog was open
+  // shows in the balance straight away.
+  const closeFund = useCallback(() => { fundRequest.current += 1; setFundState(null); setFundBusy(false); void loadData(); }, [loadData]);
+  // Fund provisions (or reuses) the account's USDG deposit wallet through
+  // POST /api/funding. The backend creates it once and registers it for deposit
+  // monitoring; the address is only shown once that monitoring is active.
   const resolveFundWallet = useCallback(async () => {
     const requestId = fundRequest.current + 1;
     fundRequest.current = requestId;
-    const known = canonicalAddress(linkedWallets(), wallet || null);
     setFundBusy(true);
-    setFundState(known ? { phase: "ready", address: known } : { phase: "loading" });
+    setFundState({ phase: "loading" });
     const live = () => fundRequest.current === requestId;
     try {
       const headers = await authHeaders();
-      const accountResponse = await fetch("/api/account", { headers, cache: "no-store" });
+      const response = await fetch("/api/funding", { method: "POST", headers, cache: "no-store" });
       if (!live()) return;
-      if (accountResponse.status === 401) { setFundState({ phase: "error", message: "Your session is no longer valid. Sign in again, then reopen Fund." }); return; }
-      if (!accountResponse.ok) throw new Error("ACCOUNT_UNAVAILABLE");
-      let account = await accountResponse.json() as AccountResponse;
-      // The backend address is only trusted when Privy reports that wallet as
-      // linked to this identity, which is exactly what canonicalAddress enforces.
-      let address = canonicalAddress(linkedWallets(), account.account.walletAddress);
-
-      if (!address) {
-        const created = await createWallet();
-        if (!live()) return;
-        if (!isEvmAddress(created.address)) throw new Error("WALLET_CREATION_FAILED");
-        const createdAddress = created.address.toLowerCase();
-        const confirmResponse = await fetch(`/api/account?wallet=${createdAddress}`, { headers, cache: "no-store" });
-        if (!live()) return;
-        if (!confirmResponse.ok) throw new Error("ACCOUNT_UNAVAILABLE");
-        account = await confirmResponse.json() as AccountResponse;
-        const refreshed = await refreshUser().catch(() => null);
-        if (!live()) return;
-        address = canonicalAddress(
-          ((refreshed ?? user)?.linkedAccounts ?? []) as unknown as CanonicalWalletCandidate[],
-          account.account.walletAddress,
-        ) ?? createdAddress;
-      }
-
+      if (response.status === 401) { setFundState({ phase: "error", message: "Your session is no longer valid. Sign in again, then reopen Fund." }); return; }
+      const data = await response.json().catch(() => null) as FundingResponse | null;
       if (!live()) return;
-      if (!address) throw new Error("WALLET_UNAVAILABLE");
-      setWallet(address);
-      setFundState({ phase: "ready", address });
+      if (!response.ok || !data) { setFundState({ phase: "error", message: data?.error ?? "Funding is temporarily unavailable. Retry in a moment." }); return; }
+      if (!data.configured || !data.chain || !data.token) { setFundState({ phase: "unavailable", message: "Deposits are not open yet. Check back shortly." }); return; }
+      if (!data.wallet || !isEvmAddress(data.wallet.address)) { setFundState({ phase: "error", message: "Your deposit address could not be prepared. Retry in a moment." }); return; }
+      if (!data.monitoring?.watched) { setFundState({ phase: "unavailable", message: "Your deposit address is being set up. Check again in a minute; it appears here once deposits to it can be credited." }); return; }
+      setFundState({
+        phase: "ready",
+        address: data.wallet.address,
+        network: data.chain.name,
+        token: data.token.symbol,
+        requiredConfirmations: data.requiredConfirmations,
+        minimumDeposit: data.minimumDeposit ?? null,
+        deposits: Array.isArray(data.deposits) ? data.deposits : [],
+      });
     } catch {
-      if (live()) setFundState({ phase: "error", message: "Your wallet address could not be confirmed from this session. Retry, or close this and reopen Fund." });
+      if (live()) setFundState({ phase: "error", message: "Funding is temporarily unavailable. Retry in a moment." });
     } finally {
       if (live()) setFundBusy(false);
     }
-  }, [authHeaders, createWallet, linkedWallets, refreshUser, user, wallet]);
-  // While the Fund surface is open, the displayed address follows the active
-  // account: linking or switching wallets in Privy repaints it immediately.
-  // Returning the same state object when nothing changed keeps this loop-free.
-  useEffect(() => {
-    if (!fundState) return;
-    const next = canonicalAddress(linkedWallets(), wallet || null);
-    if (!next) return;
-    setFundState((current) => {
-      if (!current || current.phase === "error") return current;
-      if (current.phase === "ready" && current.address === next) return current;
-      return { phase: "ready", address: next };
-    });
-  }, [fundState, linkedWallets, wallet]);
+  }, [authHeaders]);
   // Unauthenticated visitors are still sent through the Privy entry flow; an
   // authenticated session (including one restored on refresh) never is.
   useEffect(() => { if (ready && !authenticated) router.replace("/signup"); }, [ready, authenticated, router]);
@@ -305,7 +283,6 @@ export default function DashboardPage() {
   const availableMicro = balanceMicroUsd === null ? null : clampMicroUsd(balanceMicroUsd);
   const totalMicro = allowanceMicroUsd === null ? null : clampMicroUsd(allowanceMicroUsd);
   const balanceAvailable = availableMicro !== null && availableMicro > 0n;
-  const checking = sessionState === "loading";
   const percentAvailable = totalMicro && totalMicro > 0n && availableMicro !== null
     ? Number((availableMicro * 1000n) / totalMicro) / 10
     : null;
@@ -325,7 +302,7 @@ export default function DashboardPage() {
             <span className={`compute-availability ${balanceAvailable ? "" : "is-muted"}`}><i aria-hidden="true" />{percentLabel}</span>
           </div>
           <div className="compute-progress" role="img" aria-label={`${percentLabel} of the current compute allowance`}><span style={{ width: `${progressWidth}%` }} /></div>
-          {!balanceAvailable && computeState === "ready" && <p className="compute-allowance-note">No compute is currently available. Refresh to request an authoritative balance.</p>}
+          {!balanceAvailable && computeState === "ready" && <p className="compute-allowance-note">No compute yet. Use Fund to add USDG and your balance appears here.</p>}
         </>}
     </div>
     <dl className="compute-stats">
@@ -370,9 +347,8 @@ export default function DashboardPage() {
           disabled={fundBusy}
           aria-haspopup="dialog"
         >
-          {fundBusy ? "Resolving…" : "Fund"}
+          {fundBusy ? "Preparing…" : "Fund"}
         </button>
-        <button type="button" onClick={() => void loadData(true)} disabled={checking || loadingWorkspace.current}>{checking ? "Loading…" : "Refresh ↻"}</button>
       </div>
     </header>
     {computeState === "error" ? <StatusPanel title="Compute data is unavailable" body="The current server ledger balance and activity could not be loaded. No previous balance is presented." action={<button className="compute-retry" onClick={() => void loadData(true)}>Retry workspace ↻</button>} /> : allowance}

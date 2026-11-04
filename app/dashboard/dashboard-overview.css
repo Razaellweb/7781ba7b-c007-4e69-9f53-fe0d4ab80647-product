@@ -1160,6 +1160,26 @@
   line-height: 1.6;
 }
 
+/* Recent deposits under the address: amount on the left, progress on the right. */
+.compute-dashboard .fund-deposit-list {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 10px 0 0;
+  list-style: none;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+}
+.compute-dashboard .fund-deposit-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d8d8dc;
+  font: 11px var(--font-geist-mono), monospace;
+}
+.compute-dashboard .fund-deposit-status { color: #8b8b91; }
+.compute-dashboard .fund-deposit-status.is-confirmed { color: #7fd99a; }
+.compute-dashboard .fund-deposit-status.is-rejected { color: #e8a09a; }
+
 /* Loading placeholder: a small skeleton in the same slot as the address. */
 .compute-dashboard .fund-modal-loading { display: grid; gap: 12px; }
 .compute-dashboard .fund-address-skeleton {

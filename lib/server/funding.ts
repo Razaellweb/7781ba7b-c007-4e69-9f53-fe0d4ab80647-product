@@ -853,6 +853,7 @@ export async function fundingState(accountId: string, options: { createWallet?: 
     deposits: deposits.map((deposit) => publicDeposit(deposit, cfg)),
     balanceMicroUsd: await availableMicroUsd(accountId),
     requiredConfirmations: cfg.confirmations,
+    minimumDeposit: cfg.minDepositTokens,
   };
 }
 

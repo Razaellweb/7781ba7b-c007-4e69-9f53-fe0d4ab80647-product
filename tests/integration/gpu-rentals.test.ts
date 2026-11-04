@@ -95,6 +95,9 @@ run("GPU rental billing (real Postgres)", () => {
     vast.sshAttached = [];
     const rows = await db.query<{ id: string }>(`INSERT INTO user_accounts (privy_user_id) VALUES ($1) RETURNING id`, [`did:privy:test-${Math.random()}`]);
     accountId = rows[0].id;
+    // There is no free allowance any more: each test account starts with a
+    // credited $5 USDG deposit, the way a funded user gets a balance.
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,'deposit',5000000,$2)`, [accountId, `test-deposit-${accountId}`]);
   });
 
   const balance = () => mod.availableBalanceMicroUsd(accountId);

@@ -3,20 +3,34 @@
 import { useEffect, useRef } from "react";
 import { shortenAddress } from "../../lib/wallet/canonical";
 
-// The address surface opened by Overview's Fund button, once the account's
-// canonical EVM wallet has been resolved and confirmed by the backend session.
+// The deposit surface opened by Overview's Fund button. The address is the
+// account's USDG deposit wallet from POST /api/funding, which the backend
+// monitors; USDG sent to it is credited to the compute balance once confirmed.
 //
-// Scope is deliberately narrow: show one read-only address. There is no payment,
-// checkout, top-up, or funding transaction anywhere on this surface — viewing an
-// address cannot move value or claim a balance was topped up.
-//
-// The dialog owns no wallet state of its own. It renders whatever phase the page
-// reports, so a late-arriving or replaced canonical address simply repaints, and
-// an unavailable address surfaces a retryable error rather than a stale value.
+// An address is only shown once monitoring is active. Until then the dialog says
+// deposits are not ready, so nobody sends funds to an address nothing watches.
+// The dialog owns no state of its own: it renders whatever phase the page reports.
+export type FundDeposit = {
+  id: string;
+  status: "pending" | "confirmed" | "rejected";
+  amountToken: string;
+  assetSymbol: string;
+  confirmations: number;
+  requiredConfirmations: number;
+};
+
 export type FundAddressState =
   | { phase: "loading" }
-  | { phase: "ready"; address: string }
+  | { phase: "ready"; address: string; network: string; token: string; requiredConfirmations: number; minimumDeposit: string | null; deposits: FundDeposit[] }
+  | { phase: "unavailable"; message: string }
   | { phase: "error"; message: string };
+
+const depositStatus = (deposit: FundDeposit) =>
+  deposit.status === "confirmed"
+    ? "Credited"
+    : deposit.status === "rejected"
+      ? "Not credited"
+      : `Confirming ${Math.min(deposit.confirmations, deposit.requiredConfirmations)}/${deposit.requiredConfirmations}`;
 
 export default function FundWalletDialog({
   state,
@@ -78,7 +92,7 @@ export default function FundWalletDialog({
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable");
       await navigator.clipboard.writeText(address);
-      onCopied("Wallet address copied");
+      onCopied("Deposit address copied");
     } catch {
       onCopied("Copy unavailable — select the address text to copy it.");
     }
@@ -103,14 +117,15 @@ export default function FundWalletDialog({
       >
         <header className="fund-modal-header">
           <div>
-            <div className="compute-card-label">WALLET · FUND</div>
-            <h2 id="fund-modal-title">Your active wallet.</h2>
+            <div className="compute-card-label">FUND · DEPOSIT</div>
+            <h2 id="fund-modal-title">Add compute.</h2>
             <p id="fund-modal-description">
-              The canonical wallet this workspace resolved for your signed-in account. It is read-only, and nothing is
-              charged or funded from this screen.
+              {state.phase === "ready"
+                ? `Send ${state.token} on ${state.network} to your deposit address. It is added to your balance after ${state.requiredConfirmations} confirmations.`
+                : "Your personal deposit address for adding compute to this workspace."}
             </p>
           </div>
-          <button ref={closeRef} type="button" className="fund-modal-close" onClick={onClose} aria-label="Close wallet address">
+          <button ref={closeRef} type="button" className="fund-modal-close" onClick={onClose} aria-label="Close fund dialog">
             ×
           </button>
         </header>
@@ -118,34 +133,62 @@ export default function FundWalletDialog({
         <div className="fund-modal-body">
           {state.phase === "loading" && (
             <div className="fund-modal-loading" role="status">
-              <span className="fund-address-label">WALLET ADDRESS</span>
+              <span className="fund-address-label">DEPOSIT ADDRESS</span>
               <span className="fund-address-skeleton" aria-hidden="true" />
-              <p>Resolving your active wallet from the signed-in session…</p>
+              <p>Preparing your deposit address…</p>
             </div>
           )}
 
           {state.phase === "ready" && (
             <div className="fund-address-block">
-              <span className="fund-address-label">EVM WALLET ADDRESS</span>
+              <span className="fund-address-label">{state.token} DEPOSIT ADDRESS · {state.network.toUpperCase()}</span>
               <div className="fund-address-row">
                 <code
                   className="fund-address-value"
                   title={state.address}
-                  aria-label={`Active wallet address ${state.address}`}
+                  aria-label={`Deposit address ${state.address}`}
                 >
                   {shortenAddress(state.address, 6, 4)}
                 </code>
-                <button type="button" className="fund-copy-button" onClick={() => void copy()} aria-label="Copy full wallet address">
+                <button type="button" className="fund-copy-button" onClick={() => void copy()} aria-label="Copy full deposit address">
                   <span aria-hidden="true">▣</span> Copy
                 </button>
               </div>
-              <p className="fund-address-note">Read-only · confirmed by your session and reused on every visit.</p>
+              <p className="fund-address-note">
+                Only send {state.token} on {state.network}; other tokens or networks are not credited.
+                {state.minimumDeposit && Number(state.minimumDeposit) > 0 ? ` Minimum deposit ${state.minimumDeposit} ${state.token}.` : ""}
+              </p>
+              {state.deposits.length > 0 && (
+                <ul className="fund-deposit-list" aria-label="Recent deposits">
+                  {state.deposits.slice(0, 3).map((deposit) => (
+                    <li key={deposit.id}>
+                      <span>{deposit.amountToken} {deposit.assetSymbol}</span>
+                      <span className={`fund-deposit-status is-${deposit.status}`}>{depositStatus(deposit)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {state.phase === "unavailable" && (
+            <div className="fund-modal-error" role="status">
+              <span className="fund-address-label">DEPOSITS NOT READY</span>
+              <p>{state.message}</p>
+              <div className="fund-modal-error-actions">
+                <button type="button" className="fund-modal-retry" onClick={onRetry}>
+                  Check again ↻
+                </button>
+                <button type="button" className="fund-modal-dismiss" onClick={onClose}>
+                  Close
+                </button>
+              </div>
             </div>
           )}
 
           {state.phase === "error" && (
             <div className="fund-modal-error" role="alert">
-              <span className="fund-address-label">WALLET UNAVAILABLE</span>
+              <span className="fund-address-label">FUNDING UNAVAILABLE</span>
               <p>{state.message}</p>
               <div className="fund-modal-error-actions">
                 <button type="button" className="fund-modal-retry" onClick={onRetry}>
