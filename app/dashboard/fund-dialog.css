@@ -1,0 +1,104 @@
+/* ==========================================================================
+   Fund dialog body: the deposit address, its copy control, and the states
+   around it (fetching, still-registering, retryable error).
+
+   Loaded from FundWalletDialog so the address panel travels with the component.
+   These selectors carry one more class than the shared `.fund-*` rules in
+   dashboard-overview.css, so they win regardless of stylesheet order in the
+   bundle. Only the address panel is restyled; the header, close ×, and Close
+   button keep the shell's modal chrome untouched.
+   ========================================================================== */
+
+/* The whole address stays visible: it wraps instead of truncating, so nothing
+   has to be hovered or scrolled to read it. */
+.compute-dashboard .fund-address-block .fund-address-row {
+  align-items: flex-start;
+  gap: 10px;
+}
+.compute-dashboard .fund-address-block .fund-address-value {
+  flex: 1 1 140px;
+  min-width: 0;
+  color: #f2f2f3 !important;
+  font: 13px/1.6 var(--font-geist-mono), monospace;
+  letter-spacing: .01em;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  text-overflow: clip;
+  cursor: text;
+  -webkit-user-select: all;
+  user-select: all;
+}
+.compute-dashboard .fund-address-block .fund-copy-button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+.compute-dashboard .fund-address-block .fund-copy-button.is-copied {
+  border-color: rgba(127, 216, 162, .45) !important;
+  background: rgba(127, 216, 162, .14) !important;
+  color: #9fe6bb !important;
+}
+.compute-dashboard .fund-address-block .fund-copy-button.is-failed {
+  border-color: rgba(185, 164, 120, .42) !important;
+  background: rgba(185, 164, 120, .12) !important;
+  color: #e2cfa8 !important;
+}
+
+/* Copy confirmation / manual-copy hint, in the address column. */
+.compute-dashboard .fund-copy-status {
+  margin: -2px 0 0;
+  min-height: 15px;
+  color: #9fe6bb !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .05em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.compute-dashboard .fund-copy-status.is-failed { color: #e2cfa8 !important; }
+
+/* Monitoring still being registered: stated plainly, never a hidden address. */
+.compute-dashboard .fund-address-pending {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(185, 164, 120, .3);
+  border-radius: 9px;
+  background: #161310 !important;
+  color: #d8c8a8 !important;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* Fetching state: skeleton in the address slot plus a quiet spinner line. */
+.compute-dashboard .fund-modal-loading .fund-address-skeleton { max-width: none; }
+.compute-dashboard .fund-loading-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #9a9a9f !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .06em;
+}
+.compute-dashboard .fund-loading-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border: 1.5px solid rgba(255, 255, 255, .18);
+  border-top-color: #d8d8dc;
+  border-radius: 50%;
+  animation: fund-spin .8s linear infinite;
+}
+@keyframes fund-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 620px) {
+  .compute-dashboard .fund-address-block .fund-address-value { font-size: 12px; }
+  .compute-dashboard .fund-address-block .fund-copy-button { padding: 6px 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .compute-dashboard .fund-loading-spinner { animation: none !important; }
+}

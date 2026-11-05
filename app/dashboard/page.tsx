@@ -140,7 +140,7 @@ export default function DashboardPage() {
   const [copyNotice, setCopyNotice] = useState("");
   const [autoModel, setAutoModel] = useState(false);
   // null = the Fund surface is closed. Every address the dialog renders comes
-  // from here, so it is always the monitored deposit wallet from the backend.
+  // from here, so it is always the deposit wallet the backend returned.
   const [fundState, setFundState] = useState<FundAddressState | null>(null);
   const [fundBusy, setFundBusy] = useState(false);
   const invokingControl = useRef<HTMLButtonElement | null>(null);
@@ -232,7 +232,8 @@ export default function DashboardPage() {
   const closeFund = useCallback(() => { fundRequest.current += 1; setFundState(null); setFundBusy(false); void loadData(); }, [loadData]);
   // Fund provisions (or reuses) the account's USDG deposit wallet through
   // POST /api/funding. The backend creates it once and registers it for deposit
-  // monitoring; the address is only shown once that monitoring is active.
+  // monitoring. The address is shown as soon as the backend returns it; the
+  // monitoring flag is reported alongside it rather than gating the address.
   const resolveFundWallet = useCallback(async () => {
     const requestId = fundRequest.current + 1;
     fundRequest.current = requestId;
@@ -243,13 +244,14 @@ export default function DashboardPage() {
       const headers = await authHeaders();
       const response = await fetch("/api/funding", { method: "POST", headers, cache: "no-store" });
       if (!live()) return;
+      // An expired session can never show an address: the wallet belongs to the
+      // signed-in account, so this is an error state with a retry, not "not ready".
       if (response.status === 401) { setFundState({ phase: "error", message: "Your session is no longer valid. Sign in again, then reopen Fund." }); return; }
       const data = await response.json().catch(() => null) as FundingResponse | null;
       if (!live()) return;
       if (!response.ok || !data) { setFundState({ phase: "error", message: data?.error ?? "Funding is temporarily unavailable. Retry in a moment." }); return; }
-      if (!data.configured || !data.chain || !data.token) { setFundState({ phase: "unavailable", message: "Deposits are not open yet. Check back shortly." }); return; }
+      if (!data.configured || !data.chain || !data.token) { setFundState({ phase: "unavailable", message: "Deposits are not open on this deployment yet. Retry in a moment." }); return; }
       if (!data.wallet || !isEvmAddress(data.wallet.address)) { setFundState({ phase: "error", message: "Your deposit address could not be prepared. Retry in a moment." }); return; }
-      if (!data.monitoring?.watched) { setFundState({ phase: "unavailable", message: "Your deposit address is being set up. Check again in a minute; it appears here once deposits to it can be credited." }); return; }
       setFundState({
         phase: "ready",
         address: data.wallet.address,
@@ -258,6 +260,7 @@ export default function DashboardPage() {
         requiredConfirmations: data.requiredConfirmations,
         minimumDeposit: data.minimumDeposit ?? null,
         deposits: Array.isArray(data.deposits) ? data.deposits : [],
+        monitoring: Boolean(data.monitoring?.watched),
       });
     } catch {
       if (live()) setFundState({ phase: "error", message: "Funding is temporarily unavailable. Retry in a moment." });
