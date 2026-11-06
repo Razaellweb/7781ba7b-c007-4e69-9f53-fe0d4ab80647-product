@@ -84,7 +84,9 @@ export async function reserveCompute(accountId: string, operationKey: string, es
 export async function settleReservation(operationKey: string, userDebit: MicroUsd, providerCostMicroUsd: MicroUsd | null, uncertain = false, usage: { inputTokens?: number | null; outputTokens?: number | null; eventType?: "provider_usage" | "provider_failure" | "cancelled" | "partial" | "uncertain"; markupMicro?: bigint; discountBps?: number | null } = {}) {
   if (userDebit < 0n) throw new AccountingError("Debit cannot be negative");
   return transaction(async db => {
-    const r = await db.query(`SELECT r.*, i.id AS inference_id, i.api_key_id AS inference_api_key_id, i.channel AS inference_channel FROM compute_reservations r LEFT JOIN inference_records i ON i.operation_key=r.operation_key WHERE r.operation_key=$1 FOR UPDATE`, [operationKey]);
+    // Lock only the reservation: Postgres refuses FOR UPDATE on the nullable side
+    // of an outer join, and the inference row is locked separately below.
+    const r = await db.query(`SELECT r.*, i.id AS inference_id, i.api_key_id AS inference_api_key_id, i.channel AS inference_channel FROM compute_reservations r LEFT JOIN inference_records i ON i.operation_key=r.operation_key WHERE r.operation_key=$1 FOR UPDATE OF r`, [operationKey]);
     if (!r.rowCount) throw new AccountingError("Reservation not found");
     const row = r.rows[0];
     if (row.status !== "reserved") return row;

@@ -8,6 +8,8 @@ export class RedisError extends Error {
 // Upstash Redis REST transport. Each call is a single HTTPS request of the form
 // POST {url} with a JSON command array and a Bearer token. This works on every
 // serverless/IPv4 runtime, unlike a raw redis:// socket.
+const REDIS_TIMEOUT_MS = 3000;
+
 async function command<T = unknown>(args: (string | number)[]): Promise<T> {
   const config = redisConfig();
   if (!config.enabled || !config.url || !config.token) throw new RedisError("Redis is not configured");
@@ -16,6 +18,8 @@ async function command<T = unknown>(args: (string | number)[]): Promise<T> {
     headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
     body: JSON.stringify(args),
     cache: "no-store",
+    // A hung Redis must not stall the request it guards.
+    signal: AbortSignal.timeout(REDIS_TIMEOUT_MS),
   });
   if (!response.ok) throw new RedisError(`Redis command failed with status ${response.status}`);
   const payload = await response.json() as { result?: T; error?: string };
@@ -42,15 +46,20 @@ export async function cacheSet(name: string, value: unknown, ttlSeconds: number)
   catch (e) { throw new RedisError("Transient cache operation failed", { cause: e }); }
 }
 
-// Fixed-window rate limiter. Fails OPEN when Redis is unconfigured so the
-// product remains usable, but is fully enforced whenever Upstash is present.
+// Fixed-window rate limiter. Enforced whenever Upstash answers. Fails OPEN when
+// Redis is unconfigured or unreachable (e.g. a deleted database), so an outage of
+// this guard never takes inference down; spending stays bounded by the prepaid
+// balance and each request's reservation cap.
 export async function rateLimit(name: string, limit: number, windowSeconds: number): Promise<boolean> {
   if (!redisEnabled()) return true;
   try {
     const count = await command<number>(["INCR", key(`rate:${name}`)]);
     if (count === 1) await command(["EXPIRE", key(`rate:${name}`), windowSeconds]);
     return count <= limit;
-  } catch (e) { throw new RedisError("Rate-limit coordination unavailable", { cause: e }); }
+  } catch (e) {
+    console.warn(JSON.stringify({ event: "rate_limit_unavailable", limiter: name.split(":").slice(0, 2).join(":"), error: e instanceof Error ? e.message.slice(0, 200) : "unknown" }));
+    return true;
+  }
 }
 
 const RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";

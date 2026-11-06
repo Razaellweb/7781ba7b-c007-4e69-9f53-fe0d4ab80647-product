@@ -288,4 +288,45 @@ run("spendable balance (real Postgres)", () => {
     await db.query(sql); // re-running is a no-op
     expect(await accounting.availableComputeMicroUsd(accountId)).toBe(0n);
   });
+
+  // Settlement used to lock "reservations LEFT JOIN inference_records ... FOR
+  // UPDATE", which Postgres rejects (0A000), so every chat failed at the end and
+  // its reservation was never released. Mocks could not see it; real SQL does.
+  it("settles a reservation: debits the usage and releases the rest", async () => {
+    const accountId = await newAccount();
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,'deposit',1000000,$2)`, [accountId, `deposit-${accountId}`]);
+    const op = `settle-${Math.random()}`;
+    await accounting.reserveCompute(accountId, op, 500_000n, { channel: "app" });
+    expect(await accounting.availableComputeMicroUsd(accountId)).toBe(500_000n);
+    await accounting.settleReservation(op, 1_200n, 600n, false, { eventType: "provider_usage", markupMicro: 0n });
+    expect(await accounting.availableComputeMicroUsd(accountId)).toBe(998_800n);
+  });
+
+  // The chat routes save the assistant reply with this exact conflict target. It
+  // must restate the partial index's full predicate (inference_id IS NOT NULL AND
+  // role='assistant'), or Postgres rejects it (42P10) and every reply is lost.
+  it("saves one assistant reply per inference with the routes' conflict target", async () => {
+    const accountId = await newAccount();
+    const [conv] = await db.query<{ id: string }>(`INSERT INTO conversations (account_id, title) VALUES ($1,'t') RETURNING id`, [accountId]);
+    const [inf] = await db.query<{ id: string }>(`INSERT INTO inference_records (account_id, operation_key, provider, model, provider_model, conversation_id, status, markup_micro, metadata) VALUES ($1,$2,'openrouter','m','m',$3,'started',0,'{}') RETURNING id`, [accountId, `op-${Math.random()}`, conv.id]);
+    for (const route of ["app/api/chat/route.ts", "app/api/v1/chat/completions/route.ts"]) {
+      const source = await readFile(join(process.cwd(), route), "utf8");
+      const target = source.match(/ON CONFLICT \(inference_id\) WHERE [^`]*?DO NOTHING/)?.[0];
+      expect(target, route).toBeTruthy();
+      for (let i = 0; i < 2; i++) {
+        await db.query(`INSERT INTO messages (inference_id,conversation_id,account_id,role,content,partial) VALUES ($1,$2,$3,'assistant','hi',false) ${target}`, [inf.id, conv.id, accountId]);
+      }
+    }
+    const rows = await db.query(`SELECT id FROM messages WHERE inference_id=$1`, [inf.id]);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("releases the whole reservation when the provider call fails", async () => {
+    const accountId = await newAccount();
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,'deposit',1000000,$2)`, [accountId, `deposit-${accountId}`]);
+    const op = `fail-${Math.random()}`;
+    await accounting.reserveCompute(accountId, op, 500_000n, { channel: "app" });
+    await accounting.settleReservation(op, 0n, null, false, { eventType: "provider_failure", markupMicro: 0n });
+    expect(await accounting.availableComputeMicroUsd(accountId)).toBe(1_000_000n);
+  });
 });
