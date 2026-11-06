@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // These tests lock the Alchemy deposit-monitoring contract:
 //   * an address is only `watched` when Alchemy accepted the registration, and a
 //     failed registration is retried with backoff instead of being forgotten;
+//   * EVERY server-side wallet is registered without the user opening the Fund
+//     dialog (the population-wide backfill), and a configuration-gated miss does not
+//     consume a registration attempt;
 //   * a webhook must carry a valid HMAC signature or nothing happens;
 //   * wrong-chain / wrong-token / unknown-recipient / zero-value transfers never
 //     credit;
@@ -53,14 +56,17 @@ async function fakeQuery(text: string, values: unknown[] = []): Promise<Row[]> {
   if (sql.startsWith("SELECT * FROM funding_wallets WHERE id")) {
     return state.wallets.filter((row) => row.id === values[0]);
   }
-  if (sql.startsWith("SELECT * FROM funding_wallets WHERE watch_status <> 'watched'")) {
+  // retryPendingWatches: honours the attempt cap ($1) and the batch limit ($2).
+  if (sql.startsWith("SELECT * FROM funding_wallets WHERE watch_status <> 'watched' AND watch_next_attempt_at")) {
     return state.wallets
       .filter((row) => row.watch_status !== "watched")
       .filter((row) => Number(row.watch_attempts) < Number(values[0]))
+      .filter((row) => new Date(row.watch_next_attempt_at as Date).getTime() <= Date.now())
       .slice(0, Number(values[1]));
   }
-  if (sql.startsWith("SELECT * FROM funding_wallets WHERE watch_status='watched'")) {
-    return state.wallets.filter((row) => row.watch_status === "watched").slice(0, Number(values[0]));
+  // registerUnwatchedWallets: the population pass ignores backoff and the cap.
+  if (sql.startsWith("SELECT * FROM funding_wallets WHERE watch_status <> 'watched' ORDER BY")) {
+    return state.wallets.filter((row) => row.watch_status !== "watched").slice(0, Number(values[0]));
   }
   if (sql.startsWith("INSERT INTO funding_wallets")) {
     if (state.wallets.some((row) => row.account_id === values[0])) return [];
@@ -96,11 +102,18 @@ async function fakeQuery(text: string, values: unknown[] = []): Promise<Row[]> {
       wallet.watch_attempts = Number(wallet.watch_attempts) + 1;
       wallet.watch_last_error = null;
       wallet.watch_next_attempt_at = new Date();
-    } else if (sql.includes("watch_status='failed'")) {
+    } else if (sql.includes("watch_status='failed'") && sql.includes("watch_attempts=$2")) {
+      // A real provider failure consumes an attempt and backs off.
       wallet.watch_status = "failed";
       wallet.watch_attempts = values[1];
       wallet.watch_last_error = values[2];
       wallet.watch_next_attempt_at = new Date(Date.now() + Number(values[3]) * 1000);
+    } else if (sql.includes("watch_status='failed'")) {
+      // A configuration-gated miss is recorded verbatim and stays immediately
+      // retryable: no attempt is consumed and no backoff is applied.
+      wallet.watch_status = "failed";
+      wallet.watch_last_error = values[1];
+      wallet.watch_next_attempt_at = new Date();
     } else if (sql.includes("last_scanned_block")) {
       wallet.last_scanned_block = values[1];
     }
@@ -352,6 +365,19 @@ describe("Alchemy deposit monitoring", () => {
     expect(result.wallet.watch_status).toBe("watched");
   });
 
+  it("registers a newly provisioned wallet immediately, without a later user step", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+    const { getOrCreateFundingWallet } = await import("../../lib/server/funding");
+
+    const result = await getOrCreateFundingWallet("account-new");
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as { addresses_to_add: string[] };
+    expect(body.addresses_to_add).toEqual([WALLET]);
+    expect(result.created).toBe(true);
+    expect(result.monitored).toBe(true);
+    expect(result.wallet.watch_registered_at).not.toBeNull();
+  });
+
   it("records a failed registration with backoff instead of claiming it is watched", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("nope", { status: 500 }));
     const { getOrCreateFundingWallet } = await import("../../lib/server/funding");
@@ -381,6 +407,137 @@ describe("Alchemy deposit monitoring", () => {
 
     expect(retried.watched).toBeGreaterThanOrEqual(1);
     expect(state.wallets.find((row) => row.account_id === "account-3")?.watch_status).toBe("watched");
+  });
+
+  describe("watch-list lifecycle (no user action required)", () => {
+    const seedLegacyWallet = (overrides: Partial<Row> = {}) => {
+      // Mirrors a row written BEFORE watch tracking existed: `unwatched`, no
+      // attempts, no webhook id.
+      const row: Row = {
+        id: "wallet-legacy",
+        account_id: "account-legacy",
+        privy_wallet_id: "privy-legacy",
+        address: OTHER_WALLET,
+        chain_id: 4663,
+        token_address: TOKEN_LOWER,
+        token_symbol: "USDG",
+        token_decimals: 6,
+        watch_status: "unwatched",
+        watch_webhook_id: null,
+        watch_registered_at: null,
+        watch_attempts: 0,
+        watch_last_error: null,
+        watch_next_attempt_at: new Date(),
+        last_scanned_block: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+        ...overrides,
+      };
+      state.wallets.push(row);
+      return row;
+    };
+
+    it("adds pre-existing server-side wallets to the watch list in one batched call", async () => {
+      seedLegacyWallet();
+      seedLegacyWallet({ id: "wallet-legacy-2", account_id: "account-legacy-2", address: WALLET });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+      const { registerUnwatchedWallets } = await import("../../lib/server/funding");
+
+      const sweep = await registerUnwatchedWallets(50);
+
+      // One Notify call for the whole population, not one per address.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as { addresses_to_add: string[] };
+      expect(body.addresses_to_add.sort()).toEqual([WALLET, OTHER_WALLET].sort());
+      expect(sweep.attempted).toBe(2);
+      expect(sweep.watched).toBe(2);
+      expect(sweep.batches).toBe(1);
+      expect(state.wallets.every((row) => row.watch_status === "watched")).toBe(true);
+      expect(state.wallets.every((row) => row.watch_webhook_id === "wh_test")).toBe(true);
+    });
+
+    it("retries a wallet whose backoff has not elapsed and whose attempts were exhausted", async () => {
+      // Exhausted while Alchemy was unconfigured: the pass must still pick it up.
+      seedLegacyWallet({ watch_status: "failed", watch_attempts: 99, watch_next_attempt_at: new Date(Date.now() + 3_600_000) });
+      vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+      const { registerUnwatchedWallets } = await import("../../lib/server/funding");
+
+      const sweep = await registerUnwatchedWallets(50);
+
+      expect(sweep.watched).toBe(1);
+      expect(state.wallets[0].watch_status).toBe("watched");
+    });
+
+    it("does not mark a wallet watched when the Alchemy webhook is not configured", async () => {
+      vi.stubEnv("ALCHEMY_WEBHOOK_ID", "");
+      vi.stubEnv("ALCHEMY_WEBHOOK_URL", "");
+      seedLegacyWallet();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+      const { registerUnwatchedWallets } = await import("../../lib/server/funding");
+
+      const sweep = await registerUnwatchedWallets(50);
+
+      // No HTTP call is attempted against an unconfigured deployment...
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(sweep.watched).toBe(0);
+      expect(sweep.reason).toBe("alchemy_notify_unconfigured");
+      // ...and the address is truthfully recorded as NOT watched.
+      expect(state.wallets[0].watch_status).toBe("failed");
+      expect(state.wallets[0].watch_last_error).toBe("alchemy_notify_unconfigured");
+      // A configuration miss consumes no attempt and stays immediately retryable.
+      expect(state.wallets[0].watch_attempts).toBe(0);
+      expect(new Date(state.wallets[0].watch_next_attempt_at as Date).getTime()).toBeLessThanOrEqual(Date.now());
+    });
+
+    it("keeps a wallet unwatched when Alchemy has no usable RPC endpoint", async () => {
+      vi.stubEnv("ALCHEMY_API_KEY", "");
+      vi.stubEnv("ALCHEMY_RPC_URL", "");
+      seedLegacyWallet();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+      const { registerUnwatchedWallets } = await import("../../lib/server/funding");
+
+      const sweep = await registerUnwatchedWallets(50);
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      // A bare ALCHEMY_NETWORK cannot build an endpoint on its own, so the config
+      // reports the generic unconfigured reason.
+      expect(sweep.reason).toBe("alchemy_not_configured");
+      expect(state.wallets[0].watch_status).toBe("failed");
+      expect(state.wallets[0].watch_last_error).toBe("alchemy_not_configured");
+    });
+
+    it("becomes watched on the first pass after the missing configuration is supplied", async () => {
+      vi.stubEnv("ALCHEMY_NOTIFY_AUTH_TOKEN", "");
+      seedLegacyWallet();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+      const { registerUnwatchedWallets } = await import("../../lib/server/funding");
+
+      await registerUnwatchedWallets(50);
+      expect(state.wallets[0].watch_status).toBe("failed");
+
+      vi.stubEnv("ALCHEMY_NOTIFY_AUTH_TOKEN", "notify-token");
+      const second = await registerUnwatchedWallets(50);
+
+      expect(second.watched).toBe(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(state.wallets[0].watch_status).toBe("watched");
+      expect(state.wallets[0].watch_last_error).toBeNull();
+    });
+
+    it("is safe to repeat", async () => {
+      seedLegacyWallet();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+      const { registerUnwatchedWallets } = await import("../../lib/server/funding");
+
+      await registerUnwatchedWallets(50);
+      await registerUnwatchedWallets(50);
+      await registerUnwatchedWallets(50);
+
+      // Already-watched addresses are never resubmitted.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(state.wallets).toHaveLength(1);
+      expect(state.wallets[0].watch_status).toBe("watched");
+    });
   });
 
   describe("with a watched address", () => {

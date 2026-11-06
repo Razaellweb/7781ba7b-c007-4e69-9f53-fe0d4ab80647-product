@@ -6,11 +6,14 @@ import {
   fetchIncomingTokenLogs,
   getBlockNumber,
   getTransactionReceiptInfo,
+  isAlchemyRegistrationConfigReason,
+  isAlchemyTransient,
   networkMatchesConfiguredChain,
   parseAddressActivity,
-  registerMonitoredAddress,
+  registerMonitoredAddresses,
   registrationRetryDelaySeconds,
   transferLogToActivity,
+  type AddressWatchRegistration,
   type AlchemyAddressActivity,
 } from "./alchemy";
 import { query, transaction } from "./db";
@@ -24,6 +27,9 @@ import { query, transaction } from "./db";
 //   2. The address is REGISTERED for Alchemy address-activity monitoring before it
 //      is treated as watched. A registration failure keeps the row in a retryable
 //      `failed` state with backoff, so an address is never silently left unwatched.
+//      This is NOT a user action: every server-side wallet in `funding_wallets` is
+//      reconciled onto the Alchemy watch list by the lifecycle passes below, so
+//      opening the Fund dialog is never required for monitoring to begin.
 //   3. The user sends USDG on the configured chain. Alchemy notifies us (preferred),
 //      and the polling fallback reads the same USDG Transfer logs when a delivery is
 //      missed.
@@ -31,6 +37,23 @@ import { query, transaction } from "./db";
 //      depth on chain. At FUNDING_CONFIRMATIONS (three) the deposit is credited to
 //      the account's compute ledger — exactly once — and the user-visible status
 //      only then leaves `pending`.
+//
+// Watch-list lifecycle (all of it lives here, none of it needs a browser):
+//   * ensureWalletWatched() registers ONE address (used when a wallet is created and
+//     when a surface that already has that wallet asks it to self-heal).
+//   * retryPendingWatches() retries addresses past their backoff, batched into a
+//     single Alchemy call per group.
+//   * registerUnwatchedWallets() is the population-wide pass: EVERY server-side
+//     wallet that is not yet confirmed watched — including pre-existing rows
+//     written before this feature, rows whose backoff has not elapsed, and rows that
+//     used up their attempts while the Alchemy configuration was missing — is
+//     submitted to the watch list. It runs on server boot, on each funding-status
+//     visit and on each recovery sweep, so wallets become watched automatically once
+//     configuration is supplied.
+//   * Every outcome is written back truthfully: only an address Alchemy actually
+//     accepted becomes `watched`. A configuration-gated miss is recorded with its
+//     real reason but does NOT consume a registration attempt, so a later run with
+//     the missing credential in place still registers it.
 //
 // Correctness rules enforced here:
 //   * The creditable asset is USDG, identified by the explicitly configured
@@ -49,6 +72,8 @@ import { query, transaction } from "./db";
 //     converge on one credit.
 //   * A credited deposit whose transaction is no longer on the canonical chain is
 //     flagged for review rather than silently uncredited.
+//   * Reconciliation skips (and reports) addresses that are not confirmed watched,
+//     because Alchemy would not be monitoring them either.
 //
 // Access eligibility is untouched by this module: funding only moves value.
 
@@ -126,6 +151,13 @@ function client(): PrivyClient {
   return privyClient;
 }
 
+/**
+ * Addresses submitted to Alchemy's Notify API in one call. The dashboard API
+ * accepts an address list, so a whole population of deposit addresses is added to
+ * the watch list with a single round trip instead of one call per wallet.
+ */
+const WATCH_REGISTRATION_BATCH = 50;
+
 /** Converts an on-chain integer amount into the ledger's micro-USD unit. */
 export function tokenAmountToMicroUsd(rawAmount: string, decimals: number, microUsdPerToken: bigint): bigint {
   let raw: bigint;
@@ -165,13 +197,78 @@ export function depositIdempotencyKey(chainId: number, txHash: string, logIndex:
 }
 
 /**
+ * Writes the true outcome of one Alchemy registration attempt onto the wallet rows.
+ *
+ * Success marks the address `watched` — and nothing else here ever does. Failure
+ * records the provider's reason, and the two failure kinds are treated differently
+ * on purpose:
+ *   * A CONFIGURATION-gated miss (no RPC endpoint, no Notify token, no webhook, an
+ *     unparseable network, an unusable address) says nothing about the address, so
+ *     it is recorded without consuming a registration attempt and is retried on the
+ *     very next run — which is what lets wallets become watched the moment the
+ *     missing variable is supplied.
+ *   * A real provider failure (HTTP error, unreachable dashboard) increments the
+ *     attempt count and schedules the next try with exponential backoff.
+ *
+ * Returns the number of addresses that became watched.
+ */
+async function persistWatchOutcome(rows: FundingWalletRow[], registration: AddressWatchRegistration): Promise<number> {
+  if (registration.monitored) {
+    let watched = 0;
+    for (const row of rows) {
+      await query(
+        `UPDATE funding_wallets
+            SET watch_status='watched', watch_webhook_id=$2, watch_registered_at=now(),
+                watch_attempts=watch_attempts+1, watch_last_error=NULL,
+                watch_next_attempt_at=now(), updated_at=now()
+          WHERE id=$1`,
+        [row.id, registration.webhookId ?? null]
+      );
+      watched += 1;
+      console.info(JSON.stringify({ event: "funding_wallet_watched", walletId: row.id, chainId: row.chain_id, batchSize: rows.length }));
+    }
+    return watched;
+  }
+
+  const reason = registration.reason ?? "alchemy_registration_failed";
+  const configurationGated = isAlchemyRegistrationConfigReason(reason);
+  for (const row of rows) {
+    if (configurationGated) {
+      await query(
+        `UPDATE funding_wallets
+            SET watch_status='failed', watch_last_error=$2, watch_next_attempt_at=now(), updated_at=now()
+          WHERE id=$1`,
+        [row.id, reason]
+      );
+    } else {
+      const attempts = (row.watch_attempts ?? 0) + 1;
+      await query(
+        `UPDATE funding_wallets
+            SET watch_status='failed', watch_attempts=$2, watch_last_error=$3,
+                watch_next_attempt_at=now() + make_interval(secs => $4::double precision), updated_at=now()
+          WHERE id=$1`,
+        [row.id, attempts, reason, registrationRetryDelaySeconds(attempts)]
+      );
+    }
+    console.warn(JSON.stringify({
+      event: "funding_wallet_not_watched",
+      walletId: row.id,
+      attempts: configurationGated ? row.watch_attempts : (row.watch_attempts ?? 0) + 1,
+      reason,
+      configurationGated,
+    }));
+  }
+  return 0;
+}
+
+/**
  * Registers a deposit address for Alchemy address-activity monitoring and persists
  * the outcome.
  *
  * A row becomes `watched` ONLY when Alchemy accepted the registration. Anything
  * else (missing Notify credentials, HTTP failure, unreachable dashboard) records a
- * `failed` state with the reason, an incremented attempt count, and a backoff
- * timestamp so `retryPendingWatches()` picks it up again.
+ * `failed` state with the reason so `retryPendingWatches()` / the population sweep
+ * pick it up again.
  */
 export async function ensureWalletWatched(
   wallet: FundingWalletRow,
@@ -179,37 +276,19 @@ export async function ensureWalletWatched(
 ): Promise<{ watched: boolean; reason?: string }> {
   if (wallet.watch_status === "watched" && !options.force) return { watched: true };
 
-  const registration = await registerMonitoredAddress(wallet.address);
-  if (registration.monitored) {
-    await query(
-      `UPDATE funding_wallets
-          SET watch_status='watched', watch_webhook_id=$2, watch_registered_at=now(),
-              watch_attempts=watch_attempts+1, watch_last_error=NULL,
-              watch_next_attempt_at=now(), updated_at=now()
-        WHERE id=$1`,
-      [wallet.id, registration.webhookId ?? null]
-    );
-    console.info(JSON.stringify({ event: "funding_wallet_watched", walletId: wallet.id, chainId: wallet.chain_id }));
-    return { watched: true };
-  }
-
-  const attempts = (wallet.watch_attempts ?? 0) + 1;
-  const reason = registration.reason ?? "alchemy_registration_failed";
-  await query(
-    `UPDATE funding_wallets
-        SET watch_status='failed', watch_attempts=$2, watch_last_error=$3,
-            watch_next_attempt_at=now() + make_interval(secs => $4::double precision), updated_at=now()
-      WHERE id=$1`,
-    [wallet.id, attempts, reason, registrationRetryDelaySeconds(attempts)]
-  );
-  console.warn(JSON.stringify({ event: "funding_wallet_not_watched", walletId: wallet.id, attempts, reason }));
-  return { watched: false, reason };
+  const registration = await registerMonitoredAddresses([wallet.address]);
+  const watched = await persistWatchOutcome([wallet], registration);
+  return { watched: watched > 0, reason: registration.monitored ? undefined : registration.reason };
 }
 
 /**
  * Retries every address whose monitoring registration is not yet confirmed and
  * whose backoff has elapsed. This is what guarantees an address left unwatched by
  * an Alchemy outage is eventually watched rather than forgotten.
+ *
+ * Addresses are submitted to the watch list in BATCHES, so retrying a large backlog
+ * costs a handful of Notify calls instead of one per wallet. Every accepted address
+ * is promoted to `watched`; every rejected one keeps a truthful failure record.
  */
 export async function retryPendingWatches(limit = 25): Promise<{ attempted: number; watched: number }> {
   const { maxRegistrationAttempts } = fundingReconcileConfig();
@@ -223,11 +302,77 @@ export async function retryPendingWatches(limit = 25): Promise<{ attempted: numb
     [maxRegistrationAttempts, limit]
   );
   let watched = 0;
-  for (const wallet of pending) {
-    const result = await ensureWalletWatched(wallet).catch(() => null);
-    if (result?.watched) watched += 1;
+  for (let index = 0; index < pending.length; index += WATCH_REGISTRATION_BATCH) {
+    const batch = pending.slice(index, index + WATCH_REGISTRATION_BATCH);
+    const registration = await registerMonitoredAddresses(batch.map((wallet) => wallet.address));
+    watched += await persistWatchOutcome(batch, registration);
   }
   return { attempted: pending.length, watched };
+}
+
+/** Outcome of one population-wide watch registration pass. */
+export type WatchRegistrationSweep = {
+  /** Wallets submitted to the watch list this pass. */
+  attempted: number;
+  /** Wallets Alchemy accepted and that are now recorded `watched`. */
+  watched: number;
+  /** Notify calls issued (one per address batch). */
+  batches: number;
+  /** Why the pass could not register (configuration/provider), when it could not. */
+  reason: string | null;
+};
+
+/**
+ * Population-wide watch-list registration: submits EVERY server-side wallet that is
+ * not yet confirmed watched to the Alchemy Address Activity webhook.
+ *
+ * This is the lifecycle pass that removes the old requirement for a user to open the
+ * Fund dialog before monitoring could start. It deliberately ignores the backoff
+ * window and the per-address attempt cap:
+ *   * a pre-existing wallet row written before watch tracking existed has
+ *     `watch_status = 'unwatched'` and is covered here;
+ *   * a wallet whose registration failed while ALCHEMY_NOTIFY_AUTH_TOKEN /
+ *     ALCHEMY_WEBHOOK_ID / ALCHEMY_WEBHOOK_SIGNING_KEY were missing must still be
+ *     registered once they are supplied, and configuration-gated failures do not
+ *     consume attempts, so the cap never locks it out;
+ *   * a wallet whose backoff has not elapsed is still safely retried here because a
+ *     repeat registration is a no-op at Alchemy and this pass is batched.
+ *
+ * Nothing is assumed: an address only becomes `watched` when Alchemy accepted it.
+ * The pass is cheap when there is no work — an empty selection issues no HTTP call
+ * at all — and cheap when there is, because addresses are submitted in batches.
+ */
+export async function registerUnwatchedWallets(limit = 200): Promise<WatchRegistrationSweep> {
+  const wallets = await query<FundingWalletRow>(
+    `SELECT * FROM funding_wallets
+      WHERE watch_status <> 'watched'
+      ORDER BY watch_next_attempt_at ASC, created_at ASC
+      LIMIT $1`,
+    [Math.max(1, limit)]
+  ).catch((error) => {
+    console.error(JSON.stringify({ event: "funding_watch_backfill_query_failed", error: error instanceof Error ? error.name : "unknown" }));
+    return [] as FundingWalletRow[];
+  });
+
+  const sweep: WatchRegistrationSweep = { attempted: wallets.length, watched: 0, batches: 0, reason: null };
+  if (wallets.length === 0) return sweep;
+
+  for (let index = 0; index < wallets.length; index += WATCH_REGISTRATION_BATCH) {
+    const batch = wallets.slice(index, index + WATCH_REGISTRATION_BATCH);
+    const registration = await registerMonitoredAddresses(batch.map((wallet) => wallet.address));
+    sweep.batches += 1;
+    sweep.watched += await persistWatchOutcome(batch, registration);
+    if (!registration.monitored) sweep.reason = registration.reason ?? "alchemy_registration_failed";
+  }
+
+  console.info(JSON.stringify({
+    event: "funding_watch_backfill",
+    attempted: sweep.attempted,
+    watched: sweep.watched,
+    batches: sweep.batches,
+    reason: sweep.reason,
+  }));
+  return sweep;
 }
 
 /**
@@ -270,6 +415,8 @@ export async function getOrCreateFundingWallet(accountId: string): Promise<{ wal
     [accountId, created.id, address, cfg.chainId, cfg.tokenAddressLower, FUNDING_TOKEN_SYMBOL_USDG, cfg.tokenDecimals]
   );
   if (inserted[0]) {
+    // A newly provisioned wallet joins the watch list immediately, without the user
+    // having to interact with anything else.
     const registration = await ensureWalletWatched(inserted[0]);
     const refreshed = await query<FundingWalletRow>(`SELECT * FROM funding_wallets WHERE id=$1`, [inserted[0].id]);
     const wallet = refreshed[0] ?? { ...inserted[0], watch_status: registration.watched ? ("watched" as const) : ("failed" as const) };
@@ -506,6 +653,9 @@ export async function detectReorg(deposit: DepositRow): Promise<{ flagged: boole
  * Re-checks one deposit: reads its depth from Alchemy and credits it once the
  * configured confirmation count is reached. Errors are recorded on the row so a
  * later retry can pick it up; they are never allowed to throw out of a webhook.
+ *
+ * Confirmations are on-chain depth: the transfer's inclusion block plus every block
+ * mined after it, measured against the chain head at the time of the check.
  */
 export async function processDeposit(depositId: string): Promise<{ status: DepositRow["status"]; credited: boolean; confirmations: number; reorg: boolean }> {
   const cfg = fundingConfig();
@@ -622,130 +772,467 @@ export async function replayWebhookEvent(eventRowId: string): Promise<{ recorded
 }
 
 /**
+ * Upper bound on `eth_getLogs` windows scanned for one address in a single run.
+ * A wallet that has been idle for a long time is caught up over consecutive runs
+ * instead of issuing an unbounded number of log queries, which is what trips a
+ * provider rate limit and would otherwise abort the whole sweep.
+ */
+const MAX_CHUNK_SCANS_PER_WALLET = 40;
+
+/** Maps an RPC failure onto a stable reason code plus whether it is retryable. */
+function reconcileFailure(error: unknown): { reason: string; transient: boolean } {
+  if (error instanceof AlchemyError) {
+    switch (error.code) {
+      case "ALCHEMY_RATE_LIMITED": return { reason: "alchemy_rate_limited", transient: true };
+      case "ALCHEMY_TIMEOUT": return { reason: "alchemy_timeout", transient: true };
+      case "ALCHEMY_UNREACHABLE": return { reason: "alchemy_unreachable", transient: true };
+      case "ALCHEMY_UPSTREAM_ERROR": return { reason: "alchemy_upstream_error", transient: true };
+      case "ALCHEMY_UNCONFIGURED": return { reason: "alchemy_unconfigured", transient: false };
+      case "ALCHEMY_INVALID_FILTER": return { reason: "alchemy_invalid_filter", transient: false };
+      default: return { reason: "alchemy_error", transient: false };
+    }
+  }
+  return { reason: "alchemy_error", transient: isAlchemyTransient(error) };
+}
+
+/** Per-address outcome of one polling sweep. Always carries a machine-readable reason. */
+export type ReconcileWalletSummary = {
+  walletId: string;
+  accountId: string;
+  address: string;
+  status: "ok" | "skipped" | "partial" | "error";
+  /** Why the address was skipped, or why the sweep stopped early. */
+  reason: string | null;
+  /** True when the stop was a rate limit/timeout and the work resumes next run. */
+  transient: boolean;
+  /** Chain head used for this sweep. */
+  head: string | null;
+  /** Inclusive block range actually scanned (null when nothing was scanned). */
+  fromBlock: string | null;
+  toBlock: string | null;
+  /** Resume cursor before and after the sweep. */
+  cursorBefore: string | null;
+  cursorAfter: string | null;
+  scannedChunks: number;
+  scannedBlocks: string;
+  /** Qualifying transfers recorded (credited or still pending confirmations). */
+  recorded: number;
+  credited: number;
+  /** Transfers recorded but still short of FUNDING_CONFIRMATIONS. */
+  pendingConfirmations: number;
+  /** Logs filtered out because they were not the configured USDG / this address. */
+  ignored: number;
+};
+
+/**
+ * Why an address cannot be polled at all, or null when it can. Mirrors the
+ * preconditions `reconcileWallet` checks before it issues any chain call, so the
+ * sweep can report an address it deliberately did not touch without spending a
+ * request to discover the same thing.
+ */
+function unsweepableReason(wallet: FundingWalletRow, cfg: FundingConfig): string | null {
+  if (!cfg.configured) return "funding_unconfigured";
+  // An address that is not confirmed watched is never polled: Alchemy would not be
+  // monitoring it either, and crediting it would bypass the monitoring contract.
+  if (wallet.watch_status !== "watched") return "address_not_watched";
+  if (wallet.chain_id !== cfg.chainId) return "wrong_chain";
+  if (wallet.token_address !== cfg.tokenAddressLower) return "wrong_token";
+  return null;
+}
+
+/**
  * Polling fallback for one watched address: reads USDG Transfer logs addressed to
  * it and runs them through the exact same record/confirm/credit path the webhook
  * uses. The scan is filtered at the RPC level by contract address and the indexed
  * `to` topic, so nothing outside the configured asset reaches validation.
+ *
+ * Scanning is CHUNKED. On the first run (no cursor) it looks back
+ * FUNDING_RECONCILE_CHUNK_BLOCKS from head. On later runs it resumes one block past
+ * the stored cursor and walks forward in windows of the same size, so a large gap is
+ * covered by several bounded `eth_getLogs` calls rather than one oversized query.
+ * The cursor is advanced only after a window completes end to end, so a rate limit
+ * or timeout part-way through leaves the remaining blocks to be retried — nothing
+ * is skipped and nothing is re-scanned needlessly.
  */
 export async function reconcileWallet(
   wallet: FundingWalletRow,
-  options: { maxChunkBlocks?: number } = {},
-): Promise<{ status: "ok" | "skipped" | "error"; scanned: number; recorded: number; credited: number; reason?: string }> {
+  options: { maxChunkBlocks?: number; maxChunks?: number } = {},
+): Promise<ReconcileWalletSummary> {
+  const summary: ReconcileWalletSummary = {
+    walletId: wallet.id,
+    accountId: wallet.account_id,
+    address: wallet.address,
+    status: "ok",
+    reason: null,
+    transient: false,
+    head: null,
+    fromBlock: null,
+    toBlock: null,
+    cursorBefore: wallet.last_scanned_block ?? null,
+    cursorAfter: wallet.last_scanned_block ?? null,
+    scannedChunks: 0,
+    scannedBlocks: "0",
+    recorded: 0,
+    credited: 0,
+    pendingConfirmations: 0,
+    ignored: 0,
+  };
+
   const cfg = fundingConfig();
-  if (!cfg.configured) return { status: "skipped", scanned: 0, recorded: 0, credited: 0, reason: "funding_unconfigured" };
-  if (wallet.watch_status !== "watched") return { status: "skipped", scanned: 0, recorded: 0, credited: 0, reason: "address_not_watched" };
-  if (wallet.chain_id !== cfg.chainId) return { status: "skipped", scanned: 0, recorded: 0, credited: 0, reason: "wrong_chain" };
+  // Not watched (or otherwise not sweepable): reported as skipped, never polled.
+  const unsweepable = unsweepableReason(wallet, cfg);
+  if (unsweepable) return { ...summary, status: "skipped", reason: unsweepable };
 
   const { maxChunkBlocks } = fundingReconcileConfig();
-  const chunk = BigInt(Math.max(100, options.maxChunkBlocks ?? maxChunkBlocks));
+  const chunk = BigInt(Math.max(1, options.maxChunkBlocks ?? maxChunkBlocks));
+  const maxChunks = Math.max(1, options.maxChunks ?? MAX_CHUNK_SCANS_PER_WALLET);
 
   let head: bigint;
-  try { head = await getBlockNumber(); }
-  catch (error) {
-    console.warn(JSON.stringify({ event: "funding_reconcile_head_unavailable", walletId: wallet.id, error: error instanceof Error ? error.name : "unknown" }));
-    return { status: "error", scanned: 0, recorded: 0, credited: 0, reason: "alchemy_unreachable" };
+  try {
+    head = await getBlockNumber();
+  } catch (error) {
+    const failure = reconcileFailure(error);
+    console.warn(JSON.stringify({ event: "funding_reconcile_head_unavailable", walletId: wallet.id, reason: failure.reason, transient: failure.transient }));
+    return { ...summary, status: failure.transient ? "partial" : "error", reason: failure.reason, transient: failure.transient };
   }
+  summary.head = head.toString();
 
-  const cursor = wallet.last_scanned_block !== null && wallet.last_scanned_block !== undefined ? BigInt(wallet.last_scanned_block) : null;
+  const cursor = wallet.last_scanned_block !== null && wallet.last_scanned_block !== undefined
+    ? BigInt(wallet.last_scanned_block)
+    : null;
+  // First run: look back exactly one chunk window from head. Later runs: resume
+  // one block past the last fully-scanned block.
   const from = cursor !== null ? cursor + 1n : (head > chunk ? head - chunk : 0n);
+  if (from > head) return { ...summary, status: "ok", reason: "up_to_date" };
+
   let recorded = 0;
   let credited = 0;
-  let scanned = 0;
+  let pendingConfirmations = 0;
+  let ignored = 0;
+  let scannedChunks = 0;
+  let scannedBlocks = 0n;
+  let cursorAfter: bigint | null = cursor;
+  let start = from;
+  let firstStart: bigint | null = null;
+  let lastEnd: bigint | null = null;
 
-  for (let start = from; start <= head; start += chunk) {
+  while (start <= head && scannedChunks < maxChunks) {
     const end = start + chunk - 1n > head ? head : start + chunk - 1n;
     let logs;
     try {
       logs = await fetchIncomingTokenLogs({ tokenAddress: cfg.tokenAddress, toAddress: wallet.address, fromBlock: start, toBlock: end });
     } catch (error) {
-      console.warn(JSON.stringify({ event: "funding_reconcile_scan_failed", walletId: wallet.id, fromBlock: start.toString(), toBlock: end.toString(), error: error instanceof Error ? error.name : "unknown" }));
-      return { status: "error", scanned, recorded, credited, reason: "alchemy_scan_failed" };
+      const failure = reconcileFailure(error);
+      console.warn(JSON.stringify({ event: "funding_reconcile_scan_failed", walletId: wallet.id, fromBlock: start.toString(), toBlock: end.toString(), reason: failure.reason, transient: failure.transient }));
+      // The cursor stays where it was: this window and everything after it will be
+      // retried on the next run, so no transfer is lost.
+      return {
+        ...summary,
+        status: failure.transient ? "partial" : "error",
+        reason: failure.reason,
+        transient: failure.transient,
+        fromBlock: (firstStart ?? start).toString(),
+        toBlock: lastEnd === null ? null : lastEnd.toString(),
+        cursorAfter: cursorAfter === null ? null : cursorAfter.toString(),
+        scannedChunks,
+        scannedBlocks: scannedBlocks.toString(),
+        recorded,
+        credited,
+        pendingConfirmations,
+        ignored,
+      };
     }
-    scanned += 1;
+
+    if (firstStart === null) firstStart = start;
+    scannedChunks += 1;
+    scannedBlocks += end - start + 1n;
 
     for (const log of logs) {
       // Defense in depth: the RPC filter already scopes these, but never credit an
       // unexpected contract, recipient, or non-positive amount.
       if (log.tokenAddress !== cfg.tokenAddressLower) {
+        ignored += 1;
         console.warn(JSON.stringify({ event: "funding_reconcile_ignored_token", walletId: wallet.id, tokenAddress: log.tokenAddress }));
         continue;
       }
       if (!log.toAddress || log.toAddress !== wallet.address.toLowerCase()) {
+        ignored += 1;
         console.warn(JSON.stringify({ event: "funding_reconcile_ignored_recipient", walletId: wallet.id, toAddress: log.toAddress }));
         continue;
       }
       if (!log.rawAmount || log.rawAmount === "0") {
+        ignored += 1;
         console.warn(JSON.stringify({ event: "funding_reconcile_ignored_amount", walletId: wallet.id, txHash: log.txHash, logIndex: log.logIndex }));
         continue;
       }
-      const deposit = await recordActivity(transferLogToActivity(log), wallet).catch(() => null);
+
+      const deposit = await recordActivity(transferLogToActivity(log), wallet).catch((error) => {
+        console.error(JSON.stringify({ event: "funding_reconcile_record_failed", walletId: wallet.id, txHash: log.txHash, logIndex: log.logIndex, error: error instanceof Error ? error.name : "unknown" }));
+        return null;
+      });
       if (!deposit) continue;
       recorded += 1;
+
+      // The deposit row is durable at this point, so even if the depth check fails
+      // transiently the transfer is recovered by the pending-deposit retry on the
+      // next run instead of being lost.
       if (deposit.status === "pending") {
         const processed = await processDeposit(deposit.id).catch(() => null);
         if (processed?.credited) credited += 1;
+        else pendingConfirmations += 1;
+      } else if (deposit.status === "rejected") {
+        ignored += 1;
       }
     }
 
+    // Advance the resume cursor only once this window completed end to end.
+    cursorAfter = end;
+    lastEnd = end;
     await query(`UPDATE funding_wallets SET last_scanned_block=$2, updated_at=now() WHERE id=$1`, [wallet.id, end.toString()]);
+    start = end + 1n;
   }
 
-  return { status: "ok", scanned, recorded, credited };
+  return {
+    ...summary,
+    status: "ok",
+    reason: null,
+    fromBlock: (firstStart ?? from).toString(),
+    toBlock: lastEnd === null ? null : lastEnd.toString(),
+    cursorAfter: cursorAfter === null ? null : cursorAfter.toString(),
+    scannedChunks,
+    scannedBlocks: scannedBlocks.toString(),
+    recorded,
+    credited,
+    pendingConfirmations,
+    ignored,
+  };
 }
 
-/**
- * Retry/recovery sweep: retries address registrations, re-runs failed
- * notifications, re-checks pending deposits (including ones only seen once by
- * Alchemy), polls for transfers a missed webhook would have carried, and verifies
- * credited deposits for reorgs. Safe to call from a cron or the status endpoint.
- */
-export async function recoverFunding(limit = 25): Promise<{
+/** Aggregate outcome of one reconciliation sweep. */
+export type FundingRecoverySummary = {
+  /** "ok" when every step completed, "partial" when a transient fault stopped it. */
+  status: "ok" | "partial";
+  /** True when a rate limit/timeout cut the run short; the rest resumes next run. */
+  partial: boolean;
+  /** Machine-readable reason the run was partial (e.g. alchemy_rate_limited). */
+  reason: string | null;
   watches: { attempted: number; watched: number };
+  /** Population-wide watch-list pass (covers pre-existing wallets with no backoff). */
+  watchBackfill: WatchRegistrationSweep;
   events: number;
+  eventsFailed: number;
   deposits: number;
   credited: number;
+  /** Wallets swept this run (including skipped ones). */
+  wallets: number;
+  /** Wallets fully reconciled. */
   reconciled: number;
+  /** Wallets that stopped on a transient fault and resume next run. */
+  partialWallets: number;
+  /** Addresses deliberately not swept, with the reason for each. */
+  skipped: Array<{ walletId: string; address: string; reason: string }>;
+  /** Full per-address detail, including scanned block ranges and cursors. */
+  walletResults: ReconcileWalletSummary[];
   reorgs: number;
-}> {
-  const watches = await retryPendingWatches(limit);
+  errors: string[];
+  durationMs: number;
+};
 
-  const events = await query<{ id: string }>(`SELECT id FROM alchemy_webhook_events WHERE status IN ('received','failed') AND attempts < 8 ORDER BY received_at LIMIT $1`, [limit]);
+/**
+ * Retry/recovery sweep: registers every not-yet-watched deposit address on the
+ * Alchemy watch list, re-runs failed notifications, re-checks pending deposits
+ * (including ones only seen once by Alchemy), polls for transfers a missed webhook
+ * would have carried, and verifies credited deposits for reorgs. Safe to call from a
+ * cron or the status endpoint.
+ *
+ * The watch step has two parts on purpose: the backoff-respecting retry (which
+ * honours the per-address attempt cap) and then the population pass, which is what
+ * brings PRE-EXISTING server-side wallets onto the watch list even if they were
+ * written before watch tracking existed or exhausted their attempts while the
+ * Alchemy configuration was missing. Both are batched Notify calls and both are
+ * safe to repeat.
+ *
+ * The polling step is fault tolerant on purpose: a rate limit or timeout part-way
+ * through stops the CHAIN WORK, reports a partial summary, and leaves every wallet
+ * that was not processed eligible for the next run. Wallets already advanced keep
+ * their persisted cursor, so progress is never lost and never re-scanned needlessly.
+ * The sweep still VISITS every remaining candidate so each one is reported with its
+ * reason (an unwatched address is skipped, a sweepable one is deferred) instead of
+ * silently vanishing from the summary.
+ */
+export async function recoverFunding(limit = 25): Promise<FundingRecoverySummary> {
+  const startedAt = Date.now();
+  const { maxWalletsPerRun } = fundingReconcileConfig();
+  const walletLimit = Math.max(1, Math.min(limit, maxWalletsPerRun));
+  const cfg = fundingConfig();
+  const errors: string[] = [];
+
+  const watches = await retryPendingWatches(limit).catch((error) => {
+    errors.push(`watch_retry:${error instanceof Error ? error.name : "unknown"}`);
+    return { attempted: 0, watched: 0 };
+  });
+
+  // Population-wide registration: every server-side wallet that is still not
+  // confirmed watched, regardless of backoff or the attempt cap.
+  const watchBackfill = await registerUnwatchedWallets(Math.max(limit, 50)).catch((error) => {
+    errors.push(`watch_backfill:${error instanceof Error ? error.name : "unknown"}`);
+    return { attempted: 0, watched: 0, batches: 0, reason: null } as WatchRegistrationSweep;
+  });
+
+  const events = await query<{ id: string }>(`SELECT id FROM alchemy_webhook_events WHERE status IN ('received','failed') AND attempts < 8 ORDER BY received_at LIMIT $1`, [limit]).catch(() => [] as Array<{ id: string }>);
+  let eventsFailed = 0;
   for (const event of events) {
-    await replayWebhookEvent(event.id).catch((error) => console.error(JSON.stringify({ event: "funding_event_retry_failed", eventRow: event.id, error: error instanceof Error ? error.name : "unknown" })));
+    try {
+      await replayWebhookEvent(event.id);
+    } catch (error) {
+      eventsFailed += 1;
+      console.error(JSON.stringify({ event: "funding_event_retry_failed", eventRow: event.id, error: error instanceof Error ? error.name : "unknown" }));
+    }
   }
 
-  const pending = await query<{ id: string }>(`SELECT id FROM funding_deposits WHERE status='pending' AND attempts < 200 AND (last_checked_at IS NULL OR last_checked_at < now() - interval '20 seconds') ORDER BY first_seen_at LIMIT $1`, [limit]);
+  const pending = await query<{ id: string }>(`SELECT id FROM funding_deposits WHERE status='pending' AND attempts < 200 AND (last_checked_at IS NULL OR last_checked_at < now() - interval '20 seconds') ORDER BY first_seen_at LIMIT $1`, [limit]).catch(() => [] as Array<{ id: string }>);
   let credited = 0;
   for (const deposit of pending) {
     const result = await processDeposit(deposit.id).catch(() => null);
     if (result?.credited) credited += 1;
   }
 
-  // Polling fallback: addresses whose webhook deliveries may have been missed.
+  // Polling fallback. Watched addresses come FIRST (least recently scanned first),
+  // so an address that can never be swept cannot starve the ones that can. Every
+  // candidate is still visited and any address that is not watched is REPORTED as
+  // skipped with its reason rather than silently disappearing from the sweep.
   const wallets = await query<FundingWalletRow>(
-    `SELECT * FROM funding_wallets WHERE watch_status='watched' ORDER BY COALESCE(last_scanned_block, 0) ASC LIMIT $1`,
-    [limit]
-  );
+    `SELECT * FROM funding_wallets
+      ORDER BY (watch_status <> 'watched') ASC, COALESCE(last_scanned_block, 0) ASC, updated_at ASC
+      LIMIT $1`,
+    [walletLimit]
+  ).catch((error) => {
+    errors.push(`wallet_query:${error instanceof Error ? error.name : "unknown"}`);
+    return [] as FundingWalletRow[];
+  });
+
+  const walletResults: ReconcileWalletSummary[] = [];
   let reconciled = 0;
+  let partialWallets = 0;
+  let aborted = false;
+  let partialReason: string | null = null;
+
   for (const wallet of wallets) {
-    const result = await reconcileWallet(wallet).catch(() => null);
-    if (result?.status === "ok") reconciled += 1;
+    // A transient provider fault is not a per-wallet problem: once it happens the
+    // sweep stops issuing chain calls so the remaining wallets stay untouched and
+    // eligible for the next run. They are still VISITED and reported with the reason
+    // they were not swept, so no address silently disappears from the summary.
+    if (aborted) {
+      const reason = unsweepableReason(wallet, cfg) ?? "sweep_deferred";
+      walletResults.push({
+        walletId: wallet.id,
+        accountId: wallet.account_id,
+        address: wallet.address,
+        status: "skipped",
+        reason,
+        transient: false,
+        head: null,
+        fromBlock: null,
+        toBlock: null,
+        cursorBefore: wallet.last_scanned_block ?? null,
+        cursorAfter: wallet.last_scanned_block ?? null,
+        scannedChunks: 0,
+        scannedBlocks: "0",
+        recorded: 0,
+        credited: 0,
+        pendingConfirmations: 0,
+        ignored: 0,
+      });
+      continue;
+    }
+
+    let result: ReconcileWalletSummary;
+    try {
+      result = await reconcileWallet(wallet);
+    } catch (error) {
+      const failure = reconcileFailure(error);
+      errors.push(`wallet:${wallet.id}:${failure.reason}`);
+      result = {
+        walletId: wallet.id,
+        accountId: wallet.account_id,
+        address: wallet.address,
+        status: failure.transient ? "partial" : "error",
+        reason: failure.reason,
+        transient: failure.transient,
+        head: null,
+        fromBlock: null,
+        toBlock: null,
+        cursorBefore: wallet.last_scanned_block ?? null,
+        cursorAfter: wallet.last_scanned_block ?? null,
+        scannedChunks: 0,
+        scannedBlocks: "0",
+        recorded: 0,
+        credited: 0,
+        pendingConfirmations: 0,
+        ignored: 0,
+      };
+    }
+
+    walletResults.push(result);
+    credited += result.credited;
+    if (result.status === "ok") reconciled += 1;
+    if (result.status === "partial") {
+      partialWallets += 1;
+      aborted = true;
+      partialReason = partialReason ?? result.reason;
+    }
+    if (result.status === "error" && result.reason) errors.push(`wallet:${wallet.id}:${result.reason}`);
+
+    if (result.transient) {
+      aborted = true;
+      partialReason = partialReason ?? result.reason;
+    }
   }
 
-  // Reorg check on recently credited deposits (bounded, most recent first).
-  const creditedRows = await query<DepositRow>(
-    `SELECT * FROM funding_deposits
-      WHERE credited_at IS NOT NULL AND reorged_at IS NULL AND credited_at > now() - interval '2 days'
-      ORDER BY credited_at DESC LIMIT $1`,
-    [limit]
-  );
+  // Reorg verification is skipped when the provider is already throttling us; it is
+  // a safety net over already-credited value and runs on the next sweep.
   let reorgs = 0;
-  for (const row of creditedRows) {
-    const result = await detectReorg(row).catch(() => null);
-    if (result?.flagged) reorgs += 1;
+  if (!aborted) {
+    const creditedRows = await query<DepositRow>(
+      `SELECT * FROM funding_deposits
+        WHERE credited_at IS NOT NULL AND reorged_at IS NULL AND credited_at > now() - interval '2 days'
+        ORDER BY credited_at DESC LIMIT $1`,
+      [limit]
+    ).catch(() => [] as DepositRow[]);
+    for (const row of creditedRows) {
+      const result = await detectReorg(row).catch(() => null);
+      if (result?.flagged) reorgs += 1;
+    }
   }
 
-  return { watches, events: events.length, deposits: pending.length, credited, reconciled, reorgs };
+  const skipped = walletResults
+    .filter((result) => result.status === "skipped" && result.reason)
+    .map((result) => ({ walletId: result.walletId, address: result.address, reason: result.reason as string }));
+
+  const summary: FundingRecoverySummary = {
+    status: aborted ? "partial" : "ok",
+    partial: aborted,
+    reason: aborted ? partialReason : null,
+    watches,
+    watchBackfill,
+    events: events.length,
+    eventsFailed,
+    deposits: pending.length,
+    credited,
+    wallets: walletResults.length,
+    reconciled,
+    partialWallets,
+    skipped,
+    walletResults,
+    reorgs,
+    errors,
+    durationMs: Date.now() - startedAt,
+  };
+
+  if (aborted) {
+    console.warn(JSON.stringify({ event: "funding_reconcile_partial", reason: partialReason, wallets: walletResults.length, reconciled, credited, skipped: skipped.length }));
+  }
+  return summary;
 }
 
 /** Available compute balance in micro-USD, using the canonical ledger convention. */

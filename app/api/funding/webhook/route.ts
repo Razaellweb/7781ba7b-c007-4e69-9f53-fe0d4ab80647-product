@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ensureMigrated } from "../../../../lib/server/migrate";
 import { query } from "../../../../lib/server/db";
-import { alchemyWebhooksEnabled, parseAddressActivity, verifyAlchemyAuthToken, verifyAlchemySignature } from "../../../../lib/server/alchemy";
+import { alchemyMonitoringStatus, alchemyWebhooksEnabled, parseAddressActivity, verifyAlchemyAuthToken, verifyAlchemySignature } from "../../../../lib/server/alchemy";
 import { ingestActivities } from "../../../../lib/server/funding";
 
 // Alchemy Address Activity webhook.
@@ -22,10 +22,13 @@ const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 export async function POST(request: Request) {
   // Verification must be possible at all: without a configured signing key every
-  // delivery is rejected rather than trusted blindly.
+  // delivery is rejected rather than trusted blindly. The response says exactly
+  // which piece is missing instead of a single opaque failure.
   if (!alchemyWebhooksEnabled()) {
-    console.error(JSON.stringify({ event: "funding_webhook_unconfigured" }));
-    return NextResponse.json({ error: "Webhook is not configured" }, { status: 503, headers: NO_STORE });
+    const status = alchemyMonitoringStatus();
+    const reason = status.reason ?? (status.webhookConfigured ? "alchemy_webhook_not_configured" : "alchemy_webhook_signing_key_missing");
+    console.error(JSON.stringify({ event: "funding_webhook_unconfigured", reason, rpcConfigured: status.rpcConfigured, webhookConfigured: status.webhookConfigured, registrationConfigured: status.registrationConfigured }));
+    return NextResponse.json({ error: "Webhook is not configured", code: reason }, { status: 503, headers: NO_STORE });
   }
 
   const rawBody = await request.text();

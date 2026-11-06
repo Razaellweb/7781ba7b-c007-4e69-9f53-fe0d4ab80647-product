@@ -304,47 +304,160 @@ export function assertFundingConfig(options: { networkRegistry?: UsdgNetworkRegi
   return cfg;
 }
 
-// Alchemy is the only chain-monitoring provider used here: notifications arrive as
-// an Alchemy Address Activity webhook (verified with the webhook's signing key) and
-// the fallback reconciliation reads the same account's JSON-RPC endpoint. Every
-// credential is server-only and never leaves this process.
-// ALCHEMY_NETWORK arrives in three shapes: the RPC hostname form
-// ("robinhood-mainnet"), Alchemy's webhook form ("ROBINHOOD_MAINNET"), or the
-// whole RPC URL copied from the Alchemy dashboard
-// ("https://robinhood-mainnet.g.alchemy.com/v2/<key>"). The network is kept in
-// hostname form; a pasted URL is also used as the RPC endpoint as-is.
-function parseAlchemyNetwork(raw: string | undefined): { network?: string; rpcUrl?: string } {
-  if (!raw) return {};
-  const url = raw.match(/^https:\/\/([a-z0-9-]+)\.g\.alchemy\.com\/v2\/[^/\s]+\/?$/i);
-  if (url) return { network: url[1].toLowerCase(), rpcUrl: raw.replace(/\/$/, "") };
-  return { network: raw.toLowerCase().replace(/_/g, "-") };
+/* ==========================================================================
+   Alchemy (only chain-monitoring provider)
+
+   Alchemy is the only chain-monitoring provider used here: notifications arrive as
+   an Alchemy Address Activity webhook (verified with the webhook's signing key) and
+   the fallback reconciliation reads the same account's JSON-RPC endpoint. Every
+   credential is server-only and never leaves this process.
+
+   The JSON-RPC endpoint can be supplied in EITHER of two ways:
+
+     1. ALCHEMY_RPC_URL — the complete HTTP endpoint copied from the Alchemy
+        dashboard (https://<network>.g.alchemy.com/v2/<key>, or any other https
+        endpoint). It is used EXACTLY as given: no key or network segment is ever
+        appended to an explicit endpoint, because doing so would corrupt it.
+     2. ALCHEMY_API_KEY + ALCHEMY_NETWORK — the key is combined with the parsed
+        network to build the standard Alchemy endpoint shape
+        https://<network>.g.alchemy.com/v2/<key>.
+
+   ALCHEMY_NETWORK arrives in three shapes and all three resolve to one network:
+   the RPC hostname form ("robinhood-mainnet"), Alchemy's webhook form
+   ("ROBINHOOD_MAINNET"), or the whole RPC URL pasted from the Alchemy dashboard
+   ("https://robinhood-mainnet.g.alchemy.com/v2/<key>", which is also usable as the
+   endpoint itself).
+
+   Configuration states are reported DISTINCTLY rather than collapsed into one
+   generic failure, so an operator (and the Fund surface) can tell a missing
+   credential from a missing/unparseable network:
+     * "alchemy_not_configured"        — no key and no endpoint at all
+     * "alchemy_network_not_configured" — bare key with no ALCHEMY_NETWORK
+     * "alchemy_network_invalid"       — ALCHEMY_NETWORK is unparseable
+     * "alchemy_rpc_url_invalid"       — ALCHEMY_RPC_URL is not an http(s) URL
+   In every one of those states `enabled` is false, so no partial configuration is
+   ever treated as working monitoring.
+   ========================================================================== */
+
+export type AlchemyUnconfiguredReason =
+  | "alchemy_not_configured"
+  | "alchemy_network_not_configured"
+  | "alchemy_network_invalid"
+  | "alchemy_rpc_url_invalid";
+
+const ALCHEMY_UNCONFIGURED_MESSAGES: Record<AlchemyUnconfiguredReason, string> = {
+  alchemy_not_configured: "Alchemy monitoring is not configured. Set ALCHEMY_RPC_URL to the full endpoint, or ALCHEMY_API_KEY together with ALCHEMY_NETWORK.",
+  alchemy_network_not_configured: "ALCHEMY_API_KEY is set but ALCHEMY_NETWORK is not, so no RPC endpoint can be built. Set ALCHEMY_NETWORK (for example robinhood-mainnet) or ALCHEMY_RPC_URL.",
+  alchemy_network_invalid: "ALCHEMY_NETWORK is not a usable Alchemy network name or RPC URL. Use robinhood-mainnet, ROBINHOOD_MAINNET, or the full https://<network>.g.alchemy.com/v2/<key> URL.",
+  alchemy_rpc_url_invalid: "ALCHEMY_RPC_URL is not a usable http(s) URL. Paste the complete endpoint from the Alchemy dashboard.",
+};
+
+/**
+ * Normalizes an Alchemy network identifier to its RPC hostname form
+ * ("ROBINHOOD_MAINNET" -> "robinhood-mainnet"). Returns undefined for a value that
+ * is not a recognizable network rather than inventing one.
+ */
+function normalizeAlchemyNetworkName(raw: string): string | undefined {
+  const candidate = raw.trim().toLowerCase().replace(/_/g, "-");
+  if (!candidate) return undefined;
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(candidate)) return undefined;
+  return candidate;
 }
 
-export function alchemyConfig() {
+/** Extracts the network from an Alchemy endpoint URL, if the URL is one. */
+function alchemyNetworkFromUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const match = raw.trim().match(/^https?:\/\/([a-z0-9-]+)\.g\.alchemy\.com\/v2\/[^/\s]+\/?$/i);
+  return match ? normalizeAlchemyNetworkName(match[1]) : undefined;
+}
+
+/**
+ * Parses ALCHEMY_NETWORK. Accepts the RPC hostname ("robinhood-mainnet"), the
+ * webhook label ("ROBINHOOD_MAINNET"), or a full Alchemy RPC URL, which also
+ * supplies the endpoint itself.
+ */
+export function parseAlchemyNetwork(raw: string | undefined): { network?: string; rpcUrl?: string; invalid?: boolean } {
+  if (!raw) return {};
+  const trimmed = raw.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    const network = alchemyNetworkFromUrl(trimmed);
+    if (!network) return { invalid: true };
+    return { network, rpcUrl: trimmed.replace(/\/+$/, "") };
+  }
+  const network = normalizeAlchemyNetworkName(trimmed);
+  if (!network) return { invalid: true };
+  return { network };
+}
+
+/** True when the value is a complete http(s) endpoint, used exactly as given. */
+function explicitRpcEndpoint(raw: string | undefined): { url?: string; invalid: boolean } {
+  if (!raw) return { invalid: false };
+  const trimmed = raw.trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(trimmed)) return { invalid: true };
+  return { url: trimmed.replace(/\/+$/, ""), invalid: false };
+}
+
+export type AlchemyConfig = {
+  /** True when EITHER ALCHEMY_API_KEY or a full ALCHEMY_RPC_URL endpoint is set. */
+  apiKeyConfigured: boolean;
+  /** Webhook signature verification is only possible with a signing key. */
+  webhookConfigured: boolean;
+  webhookId: string | undefined;
+  webhookUrl: string | undefined;
+  /** Notify API token, used to register deposit addresses for address activity. */
+  notifyToken: string | undefined;
+  /** True when an address can actually be registered on a Notify webhook. */
+  addressRegistrationConfigured: boolean;
+  authToken: string | undefined;
+  network: string | undefined;
+  /** Resolved JSON-RPC endpoint. An explicit ALCHEMY_RPC_URL is never rewritten. */
+  rpcUrl: string | undefined;
+  /** True only when a usable rpcUrl exists. */
+  enabled: boolean;
+  /** Machine-readable reason the endpoint is unusable; null when enabled. */
+  unconfiguredReason: AlchemyUnconfiguredReason | null;
+  /** Human-readable counterpart, safe to surface in an API response or a log. */
+  message: string | null;
+};
+
+export function alchemyConfig(): AlchemyConfig {
   const apiKey = optional("ALCHEMY_API_KEY");
   const signingKey = optional("ALCHEMY_WEBHOOK_SIGNING_KEY");
   const authToken = optional("ALCHEMY_WEBHOOK_AUTH_TOKEN");
   const notifyToken = optional("ALCHEMY_NOTIFY_AUTH_TOKEN");
   const webhookId = optional("ALCHEMY_WEBHOOK_ID");
   const webhookUrl = optional("ALCHEMY_WEBHOOK_URL");
-  const parsed = parseAlchemyNetwork(optional("ALCHEMY_NETWORK") ?? optional("FUNDING_ALCHEMY_NETWORK"));
-  const network = parsed.network;
-  // Standard Alchemy HTTP endpoint shape: https://<network>.g.alchemy.com/v2/<key>
-  const rpcUrl = optional("ALCHEMY_RPC_URL") ?? parsed.rpcUrl ?? (apiKey && network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : undefined);
+  const networkRaw = optional("ALCHEMY_NETWORK") ?? optional("FUNDING_ALCHEMY_NETWORK");
+  const parsed = parseAlchemyNetwork(networkRaw);
+  // An explicit endpoint wins and is used intact; the network label then comes from
+  // ALCHEMY_NETWORK when present, otherwise from the endpoint's own hostname.
+  const explicit = explicitRpcEndpoint(optional("ALCHEMY_RPC_URL"));
+  const network = parsed.network ?? alchemyNetworkFromUrl(explicit.url);
+
+  let rpcUrl: string | undefined = explicit.url ?? parsed.rpcUrl;
+  if (!rpcUrl && apiKey && network) rpcUrl = `https://${network}.g.alchemy.com/v2/${apiKey}`;
+
+  let unconfiguredReason: AlchemyUnconfiguredReason | null = null;
+  if (!rpcUrl) {
+    if (explicit.invalid) unconfiguredReason = "alchemy_rpc_url_invalid";
+    else if (parsed.invalid) unconfiguredReason = "alchemy_network_invalid";
+    else if (apiKey) unconfiguredReason = "alchemy_network_not_configured";
+    else unconfiguredReason = "alchemy_not_configured";
+  }
+
   return {
-    apiKeyConfigured: Boolean(apiKey),
-    /** Webhook signature verification is only possible with a signing key. */
+    apiKeyConfigured: Boolean(apiKey || explicit.url || parsed.rpcUrl),
     webhookConfigured: Boolean(signingKey),
     webhookId,
     webhookUrl,
-    /** Notify API token, used to register deposit addresses for address activity. */
     notifyToken,
-    /** True when an address can actually be registered on a Notify webhook. */
     addressRegistrationConfigured: Boolean(notifyToken && (webhookId || webhookUrl)),
     authToken,
     network,
     rpcUrl,
     enabled: Boolean(rpcUrl),
+    unconfiguredReason,
+    message: unconfiguredReason ? ALCHEMY_UNCONFIGURED_MESSAGES[unconfiguredReason] : null,
   };
 }
 

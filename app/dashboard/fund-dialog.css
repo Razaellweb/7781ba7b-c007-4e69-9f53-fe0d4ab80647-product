@@ -1,6 +1,7 @@
 /* ==========================================================================
-   Fund dialog body: the deposit address, its copy control, and the states
-   around it (fetching, still-registering, retryable error).
+   Fund dialog body: the deposit address, its copy control, the per-deposit
+   list, and the states around them (fetching, still-registering, rechecking,
+   deposits-not-ready, retryable error).
 
    Loaded from FundWalletDialog so the address panel travels with the component.
    These selectors carry one more class than the shared `.fund-*` rules in
@@ -59,7 +60,8 @@
 }
 .compute-dashboard .fund-copy-status.is-failed { color: #e2cfa8 !important; }
 
-/* Monitoring still being registered: stated plainly, never a hidden address. */
+/* Monitoring still being registered, or monitoring that cannot start because a
+   setting is missing: stated plainly, never a hidden address. */
 .compute-dashboard .fund-address-pending {
   margin: 0;
   padding: 10px 12px;
@@ -70,6 +72,223 @@
   font-size: 12px;
   line-height: 1.55;
 }
+/* The panel carries more than one line when the backend reported a specific
+   configuration reason; keep them spaced and never touching the border. */
+.compute-dashboard .fund-address-pending > p {
+  margin: 0;
+  color: inherit !important;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.compute-dashboard .fund-address-pending > p + p {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(185, 164, 120, .18);
+}
+/* The headline states WHICH setting is wrong (missing network vs. missing
+   endpoint), so it reads as a diagnosis rather than a generic failure. */
+.compute-dashboard .fund-address-pending .fund-monitoring-headline {
+  color: #e2cfa8 !important;
+  font: 10.5px var(--font-geist-mono), monospace;
+  letter-spacing: .06em;
+  text-transform: none;
+}
+/* The machine-readable reason (alchemy_not_configured, alchemy_network_invalid,
+   …) is a distinct code, so it is set apart in mono type rather than prose. */
+.compute-dashboard .fund-address-pending .fund-address-reason {
+  color: #b9a478 !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .06em;
+  text-transform: none;
+}
+.compute-dashboard .fund-address-pending .fund-address-reason code {
+  color: #e2cfa8 !important;
+  font: inherit;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+/* Environment variable names: selectable mono tokens, never values. */
+.compute-dashboard .fund-missing-vars { color: #e2cfa8; }
+.compute-dashboard .fund-missing-vars code {
+  padding: 1px 5px;
+  border: 1px solid rgba(185, 164, 120, .32);
+  border-radius: 4px;
+  background: #1d1913;
+  color: #f0dfba !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .04em;
+  -webkit-user-select: all;
+  user-select: all;
+}
+.compute-dashboard .fund-missing-line {
+  color: #b9a478 !important;
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* Scheduled reconciliation cannot run: named variable, quiet treatment. */
+.compute-dashboard .fund-scheduler-note {
+  margin: 0;
+  padding: 8px 11px;
+  border: 1px dashed rgba(255, 255, 255, .14);
+  border-radius: 8px;
+  color: #9a9a9f !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .04em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.compute-dashboard .fund-scheduler-note code {
+  color: #d8c8a8 !important;
+  font: inherit;
+}
+
+/* ---------------------------- Deposits list ----------------------------- */
+.compute-dashboard .fund-deposits {
+  display: grid;
+  gap: 9px;
+  margin-top: 4px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+}
+.compute-dashboard .fund-deposits-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.compute-dashboard .fund-recheck-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, .16) !important;
+  border-radius: 99px;
+  background: #1c1c1c !important;
+  color: #dedee1 !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .05em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease;
+}
+.compute-dashboard .fund-recheck-button:hover:not(:disabled) {
+  background: #262626 !important;
+  border-color: rgba(255, 255, 255, .3) !important;
+  color: #ffffff !important;
+}
+.compute-dashboard .fund-recheck-button:disabled { opacity: .6; cursor: progress; }
+
+/* Each deposit is its own row: exact amount on the left, its state on the
+   right. The base list rule in dashboard-overview.css is a single flex line, so
+   the row is re-laid-out here to allow a reason line beneath it. */
+.compute-dashboard .fund-address-block .fund-deposit-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 0;
+}
+.compute-dashboard .fund-address-block .fund-deposit-list li {
+  display: block;
+  padding: 7px 0;
+  border-top: 1px solid rgba(255, 255, 255, .06);
+}
+.compute-dashboard .fund-address-block .fund-deposit-list li:first-child { border-top: 0; }
+.compute-dashboard .fund-deposit-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.compute-dashboard .fund-deposit-amount {
+  color: #f2f2f3 !important;
+  font: 12px var(--font-geist-mono), monospace;
+  letter-spacing: .01em;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.compute-dashboard .fund-deposit-status {
+  flex: 0 0 auto;
+  text-align: right;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .04em;
+  line-height: 1.5;
+  color: #8b8b91 !important;
+}
+.compute-dashboard .fund-deposit-status.is-pending { color: #e2cfa8 !important; }
+.compute-dashboard .fund-deposit-status.is-confirmed { color: #9fe6bb !important; }
+.compute-dashboard .fund-deposit-status.is-rejected { color: #e8a09a !important; }
+.compute-dashboard .fund-deposit-reason {
+  margin: 4px 0 0;
+  color: #d8c8a8 !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .02em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.compute-dashboard .fund-deposit-reason strong {
+  color: #f0dfba !important;
+  font-weight: 500;
+}
+.compute-dashboard .fund-deposit-reason.is-pending { color: #8b8b91 !important; }
+.compute-dashboard .fund-deposit-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed rgba(255, 255, 255, .12);
+  border-radius: 9px;
+  background: #101010 !important;
+  color: #9a9a9f !important;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* A recheck that fails on the network keeps the deposits above on screen and
+   only adds this line: nothing is blanked, nothing is re-framed as an error
+   state for the whole panel. */
+.compute-dashboard .fund-recheck-error {
+  margin: 2px 0 0;
+  padding: 8px 11px;
+  border: 1px solid rgba(185, 164, 120, .3);
+  border-radius: 8px;
+  background: #161310 !important;
+  color: #d8c8a8 !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .04em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.compute-dashboard .fund-recheck-note {
+  margin: 2px 0 0;
+  color: #8b8b91 !important;
+  font: 10px var(--font-geist-mono), monospace;
+  letter-spacing: .04em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* ----------------------- Deposits not ready panel ----------------------- */
+.compute-dashboard .fund-not-ready .fund-not-ready-headline {
+  color: #f0dfba !important;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -.01em;
+}
+.compute-dashboard .fund-config-issues {
+  margin: 0;
+  padding: 0 0 0 16px;
+  color: #c9b993 !important;
+  font: 10px var(--font-geist-mono), monospace;
+  line-height: 1.7;
+}
+.compute-dashboard .fund-config-issues li { overflow-wrap: anywhere; }
 
 /* Fetching state: skeleton in the address slot plus a quiet spinner line. */
 .compute-dashboard .fund-modal-loading .fund-address-skeleton { max-width: none; }
@@ -94,11 +313,20 @@
   to { transform: rotate(360deg); }
 }
 
+/* The dialog now carries the deposit history, so it needs a little more room
+   before it starts scrolling. The extra backdrop class keeps this above the
+   shared `.fund-modal` rule whatever the bundle order. */
+.compute-dashboard .fund-modal-backdrop .fund-modal { max-height: min(640px, calc(100vh - 44px)); }
+
 @media (max-width: 620px) {
   .compute-dashboard .fund-address-block .fund-address-value { font-size: 12px; }
   .compute-dashboard .fund-address-block .fund-copy-button { padding: 6px 10px; }
+  .compute-dashboard .fund-deposit-row { flex-wrap: wrap; gap: 4px; }
+  .compute-dashboard .fund-deposit-status { text-align: left; }
+  .compute-dashboard .fund-modal-backdrop .fund-modal { max-height: 88vh; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .compute-dashboard .fund-loading-spinner { animation: none !important; }
+  .compute-dashboard .fund-recheck-button { transition: none !important; }
 }

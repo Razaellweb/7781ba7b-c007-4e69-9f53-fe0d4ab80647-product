@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import WorkspaceShell from "../../components/WorkspaceShell";
 import ModelLogo from "../../components/ModelLogo";
 import ModelCapabilities, { capabilityText, contextWindowLabel, type CapabilityModel } from "../../components/ModelCapabilities";
-import FundWalletDialog, { type FundAddressState, type FundDeposit } from "./FundWalletDialog";
+import FundWalletDialog, { type FundAddressState, type FundDeposit, type FundMonitoringConfig, type FundRecheckState, type FundSchedulerState } from "./FundWalletDialog";
 import { isEvmAddress } from "../../lib/wallet/canonical";
 import "./dashboard.css";
 import "./dashboard-overview.css";
@@ -18,16 +18,34 @@ type LoadState = "idle" | "loading" | "ready" | "error";
 type Activity = { operation_key: string; model: string; status: string; input_tokens: number | null; output_tokens: number | null; user_debit_micro_usd: string | null; created_at: string };
 type Model = CapabilityModel & { id: string; displayName: string; description?: string | null; family: string | null; featured: boolean; registryStatus: string; provider: string; providerLabel?: string | null; providerModelSlug: string; sourceUrl: string | null; contextLength: number | null; pricing: Record<string, string> | null; architecture: { inputModalities: string[]; outputModalities: string[] } | null; supportedParameters: string[] | null; licenseStatus: string; providerTermsStatus: string; availability: "available" | "unavailable" | "stale"; syncStatus: string };
 type AccountResponse = { account: { walletAddress: string | null } };
+// The funding response is the ONLY source of deposit and configuration state. It
+// carries each deposit's own amount and state, the monitoring configuration (with
+// the environment variable NAMES still missing and WHY it is unusable), and whether
+// the scheduled sweep can run — so a missing RPC endpoint, a missing network, and a
+// missing cron secret stay distinguishable instead of collapsing into one message.
+type FundingRecheckSummary = {
+  credited?: number;
+  pendingChecked?: number;
+  skipped?: boolean;
+  reason?: string | null;
+  watches?: { attempted?: number; watched?: number };
+};
 type FundingResponse = {
   configured: boolean;
   error?: string;
+  code?: string;
+  message?: string | null;
+  issues?: string[];
   chain: { id: number; name: string } | null;
-  token: { symbol: string } | null;
+  token: { symbol: string; address?: string; decimals?: number } | null;
   wallet: { address: string } | null;
-  monitoring: { watched: boolean } | null;
+  monitoring: { watched: boolean; lastError?: string | null } | null;
   deposits: FundDeposit[];
   requiredConfirmations: number;
   minimumDeposit?: string | null;
+  alchemy?: (FundMonitoringConfig & { enabled: boolean }) | null;
+  scheduler?: FundSchedulerState | null;
+  recheck?: FundingRecheckSummary | null;
 };
 type AllowanceResponse = { balance?: { available?: string }; allowance?: { amount_micro_usd?: string; period_end?: string } | null };
 
@@ -61,6 +79,110 @@ const summarizeUsage = (activity: Activity[]) => {
   const models = new Set(activity.map((item) => item.model).filter(Boolean));
   return { spendMicroUsd: spend.toString(), requests: activity.length, modelsUsed: models.size };
 };
+
+/**
+ * Turns one funding response into the dialog's state.
+ *
+ * Three outcomes are kept apart on purpose, because they need different copy:
+ *   * `unprovisioned` + kind "misconfigured" — a setting is missing (the backend's
+ *     own issues and the ALCHEMY_* names still to set are shown verbatim);
+ *   * `unprovisioned` + kind "provisioning"  — the address simply does not exist yet;
+ *   * `ready` — an address exists, so every deposit it owns is listed with its own
+ *     exact amount and its own state. No deposits is an idle empty state.
+ */
+const buildFundSurface = (
+  data: FundingResponse,
+  recheck: FundRecheckState,
+): { state: FundAddressState; monitoringConfig: FundMonitoringConfig | null } => {
+  const monitoringConfig: FundMonitoringConfig | null = data.alchemy
+    ? {
+        enabled: Boolean(data.alchemy.enabled),
+        reason: data.alchemy.reason ?? null,
+        message: data.alchemy.message ?? null,
+        missing: Array.isArray(data.alchemy.missing) ? data.alchemy.missing : [],
+      }
+    : null;
+  const scheduler = data.scheduler ?? null;
+  const issues = Array.isArray(data.issues) ? data.issues.filter((issue) => typeof issue === "string" && issue.trim() !== "") : [];
+
+  if (!data.configured || !data.chain || !data.token) {
+    const missing = monitoringConfig?.missing ?? [];
+    return {
+      state: {
+        phase: "unprovisioned",
+        kind: issues.length > 0 || missing.length > 0 ? "misconfigured" : "provisioning",
+        message: data.message?.trim()
+          || "This workspace has no deposit address yet, so deposits cannot be credited. Check again in a moment.",
+        issues,
+        missing,
+        scheduler,
+      },
+      monitoringConfig,
+    };
+  }
+
+  if (!data.wallet || !isEvmAddress(data.wallet.address)) {
+    return {
+      state: {
+        phase: "unprovisioned",
+        kind: "provisioning",
+        message: "Your deposit address is being set up for this workspace. Check again in a minute; it appears here once deposits to it can be credited.",
+        issues: [],
+        missing: [],
+        scheduler,
+      },
+      monitoringConfig,
+    };
+  }
+
+  // The configuration reason comes from the backend, so it is never invented here.
+  const monitoringReason = monitoringConfig && !monitoringConfig.enabled
+    ? monitoringConfig.reason ?? data.monitoring?.lastError ?? null
+    : data.monitoring?.watched === false
+      ? data.monitoring.lastError ?? null
+      : null;
+
+  return {
+    state: {
+      phase: "ready",
+      address: data.wallet.address,
+      network: data.chain.name,
+      token: data.token.symbol,
+      tokenAddress: data.token.address ?? null,
+      requiredConfirmations: data.requiredConfirmations,
+      minimumDeposit: data.minimumDeposit ?? null,
+      deposits: Array.isArray(data.deposits) ? data.deposits : [],
+      monitoring: Boolean(data.monitoring?.watched),
+      monitoringReason,
+      monitoringMessage: monitoringConfig?.message ?? null,
+      monitoringMissing: monitoringConfig?.missing ?? [],
+      scheduler,
+      recheck,
+    },
+    monitoringConfig,
+  };
+};
+
+/** One-line summary of what a recheck actually did. */
+const recheckSummary = (summary: FundingRecheckSummary | null | undefined): string => {
+  const credited = summary?.credited ?? 0;
+  const pending = summary?.pendingChecked ?? 0;
+  const scanned = summary?.watches?.watched ?? 0;
+  if (credited > 0) return `${credited} ${credited === 1 ? "deposit" : "deposits"} credited to your compute balance.`;
+  if (summary?.skipped && summary.reason === "no_deposit_address") return "No deposit address yet — nothing to check.";
+  if (summary?.reason === "alchemy_unconfigured") return "Checked: deposit detection is not configured yet, so no transfers could be read.";
+  if (summary?.reason === "address_not_watched") return "Checked: monitoring for this address is still being registered.";
+  if (summary?.reason && summary.reason.startsWith("alchemy_")) return "Checked: the chain could not be read just now. Your deposits are unchanged.";
+  if (pending > 0) return `Checked ${pending} pending ${pending === 1 ? "deposit" : "deposits"} — no change yet.`;
+  if (scanned > 0) return "Checked: monitoring registration confirmed.";
+  return "Checked just now. No new transfers or confirmations yet.";
+};
+
+/** A recheck that failed part-way is an INLINE note, never a reason to hide deposits. */
+const recheckFailed = (summary: FundingRecheckSummary | null | undefined): boolean =>
+  summary?.reason === "recheck_failed" || summary?.reason === "reconcile_failed";
+
+const IDLE_RECHECK: FundRecheckState = { busy: false, error: null, message: null };
 
 function StatusPanel({ title, body, action }: { title: string; body: string; action?: ReactNode }) { return <div className="compute-status-panel"><span className="compute-status-mark">!</span><div><h2>{title}</h2><p>{body}</p>{action}</div></div>; }
 
@@ -142,6 +264,8 @@ export default function DashboardPage() {
   // null = the Fund surface is closed. Every address the dialog renders comes
   // from here, so it is always the deposit wallet the backend returned.
   const [fundState, setFundState] = useState<FundAddressState | null>(null);
+  // Monitoring configuration reported alongside the address (variable NAMES only).
+  const [fundMonitoring, setFundMonitoring] = useState<FundMonitoringConfig | null>(null);
   const [fundBusy, setFundBusy] = useState(false);
   const invokingControl = useRef<HTMLButtonElement | null>(null);
   const loadingWorkspace = useRef(false);
@@ -229,11 +353,14 @@ export default function DashboardPage() {
   }, []);
   // Closing refreshes compute, so a deposit credited while the dialog was open
   // shows in the balance straight away.
-  const closeFund = useCallback(() => { fundRequest.current += 1; setFundState(null); setFundBusy(false); void loadData(); }, [loadData]);
+  const closeFund = useCallback(() => { fundRequest.current += 1; setFundState(null); setFundMonitoring(null); setFundBusy(false); void loadData(); }, [loadData]);
   // Fund provisions (or reuses) the account's USDG deposit wallet through
   // POST /api/funding. The backend creates it once and registers it for deposit
   // monitoring. The address is shown as soon as the backend returns it; the
-  // monitoring flag is reported alongside it rather than gating the address.
+  // monitoring flag is reported alongside it rather than gating the address, and
+  // the backend's own configuration reason (plus the variable names still missing)
+  // is carried through so a missing RPC endpoint/key, a missing or unparseable
+  // network, and a missing cron secret each read differently.
   const resolveFundWallet = useCallback(async () => {
     const requestId = fundRequest.current + 1;
     fundRequest.current = requestId;
@@ -250,24 +377,66 @@ export default function DashboardPage() {
       const data = await response.json().catch(() => null) as FundingResponse | null;
       if (!live()) return;
       if (!response.ok || !data) { setFundState({ phase: "error", message: data?.error ?? "Funding is temporarily unavailable. Retry in a moment." }); return; }
-      if (!data.configured || !data.chain || !data.token) { setFundState({ phase: "unavailable", message: "Deposits are not open on this deployment yet. Retry in a moment." }); return; }
-      if (!data.wallet || !isEvmAddress(data.wallet.address)) { setFundState({ phase: "error", message: "Your deposit address could not be prepared. Retry in a moment." }); return; }
-      setFundState({
-        phase: "ready",
-        address: data.wallet.address,
-        network: data.chain.name,
-        token: data.token.symbol,
-        requiredConfirmations: data.requiredConfirmations,
-        minimumDeposit: data.minimumDeposit ?? null,
-        deposits: Array.isArray(data.deposits) ? data.deposits : [],
-        monitoring: Boolean(data.monitoring?.watched),
-      });
+      const surface = buildFundSurface(data, { ...IDLE_RECHECK });
+      setFundMonitoring(surface.monitoringConfig);
+      setFundState(surface.state);
     } catch {
       if (live()) setFundState({ phase: "error", message: "Funding is temporarily unavailable. Retry in a moment." });
     } finally {
       if (live()) setFundBusy(false);
     }
   }, [authHeaders]);
+  // "Check again": re-runs the funding reconciliation for THIS wallet (watch
+  // retries, a bounded USDG transfer scan on chain 4663, and a confirmation-depth
+  // re-check of every pending deposit) and refreshes the dialog in place. The cron
+  // endpoint's CRON_SECRET protection is untouched — this path authorizes with the
+  // caller's own Privy session and never sees the secret. A failure here keeps the
+  // last known deposits on screen and only adds an inline note.
+  const recheckFund = useCallback(async () => {
+    if (!fundState || fundState.phase !== "ready" || fundState.recheck.busy) return;
+    const requestId = fundRequest.current;
+    const live = () => fundRequest.current === requestId;
+    setFundState((current) => current && current.phase === "ready"
+      ? { ...current, recheck: { busy: true, error: null, message: null } }
+      : current);
+    const failInline = (message: string) => {
+      setFundState((current) => current && current.phase === "ready"
+        ? { ...current, recheck: { busy: false, error: message, message: null } }
+        : current);
+    };
+    try {
+      const headers = await authHeaders();
+      const response = await fetch("/api/funding/recheck", { method: "POST", headers, cache: "no-store" });
+      if (!live()) return;
+      if (response.status === 401) { failInline("Your session is no longer valid. Sign in again to check deposits."); return; }
+      const data = await response.json().catch(() => null) as FundingResponse | null;
+      if (!live()) return;
+      if (!response.ok || !data) {
+        failInline(response.status === 503
+          ? "The funding service is temporarily unavailable. Retry in a moment."
+          : data?.error ?? "The check could not be completed just now.");
+        return;
+      }
+      const failed = recheckFailed(data.recheck);
+      const surface = buildFundSurface(data, { busy: false, error: null, message: recheckSummary(data.recheck) });
+      setFundMonitoring(surface.monitoringConfig);
+      setFundState((current) => {
+        // Never replace the address being looked at with a "not ready" panel because a
+        // transient backend state lost the wallet row: the only thing that changes is
+        // the recheck note.
+        const base: FundAddressState = current && current.phase === "ready" && surface.state.phase !== "ready"
+          ? current
+          : surface.state;
+        if (base.phase !== "ready") return base;
+        if (failed) {
+          return { ...base, recheck: { busy: false, error: "The check could not complete just now. Your deposits are unchanged.", message: null } };
+        }
+        return base;
+      });
+    } catch {
+      if (live()) failInline("The check could not reach the network. Your deposits are unchanged.");
+    }
+  }, [authHeaders, fundState]);
   // Unauthenticated visitors are still sent through the Privy entry flow; an
   // authenticated session (including one restored on refresh) never is.
   useEffect(() => { if (ready && !authenticated) router.replace("/signup"); }, [ready, authenticated, router]);
@@ -334,7 +503,7 @@ export default function DashboardPage() {
       <small className="compute-sidebar-note">{wallet ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : "Wallet not linked · not required"}</small>
       <button type="button" onClick={() => void signOut()}>Sign out ↗</button>
     </>}
-    overlays={<>{selectedModel && <ModelDetails model={selectedModel} onClose={closeModelDetails} onUse={() => void openSelectedModel()} onCopied={setCopyNotice} />}{fundState && <FundWalletDialog state={fundState} onClose={closeFund} onRetry={() => void resolveFundWallet()} onCopied={setCopyNotice} />}{copyNotice && <div className="model-copy-feedback" role="status">{copyNotice}</div>}</>}
+    overlays={<>{selectedModel && <ModelDetails model={selectedModel} onClose={closeModelDetails} onUse={() => void openSelectedModel()} onCopied={setCopyNotice} />}{fundState && <FundWalletDialog state={fundState} monitoringConfig={fundMonitoring} onClose={closeFund} onRetry={() => void resolveFundWallet()} onRecheck={() => void recheckFund()} onCopied={setCopyNotice} />}{copyNotice && <div className="model-copy-feedback" role="status">{copyNotice}</div>}</>}
   >
     <header className="compute-header">
       <div className="compute-header-copy">

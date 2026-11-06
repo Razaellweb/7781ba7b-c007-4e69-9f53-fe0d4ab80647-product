@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { alchemyConfig } from "./config";
+import { alchemyConfig, type AlchemyUnconfiguredReason } from "./config";
 
 // Alchemy is the ONLY chain-monitoring provider in this funding flow.
 //
@@ -18,32 +18,106 @@ import { alchemyConfig } from "./config";
 //      deliveries are missed, so reconciliation never depends on a single channel.
 //
 // Credentials are read from the server environment and never leave this process.
+// The JSON-RPC endpoint may come from a bare ALCHEMY_API_KEY + ALCHEMY_NETWORK pair
+// or from a complete ALCHEMY_RPC_URL endpoint (see alchemyConfig()); this module
+// only ever consumes the resolved `rpcUrl`, so both shapes work identically here.
 
 export class AlchemyError extends Error {
   readonly code: string;
   constructor(message: string, code: string) { super(message); this.code = code; this.name = "AlchemyError"; }
 }
 
+/**
+ * RPC failures a caller can safely retry. The request either never reached the
+ * chain, or the provider explicitly asked us to slow down. The reconciliation
+ * sweep reports these as a partial result and leaves the remaining work for the
+ * next run instead of treating them as a hard failure.
+ */
+export const ALCHEMY_TRANSIENT_CODES = [
+  "ALCHEMY_RATE_LIMITED",
+  "ALCHEMY_TIMEOUT",
+  "ALCHEMY_UNREACHABLE",
+  "ALCHEMY_UPSTREAM_ERROR",
+] as const;
+
+/** True when the failure is a rate limit, timeout, or transient upstream fault. */
+export function isAlchemyTransient(error: unknown): boolean {
+  if (error instanceof AlchemyError) return (ALCHEMY_TRANSIENT_CODES as readonly string[]).includes(error.code);
+  // An unwrapped fetch/abort rejection is retryable for the same reason.
+  return error instanceof Error && ["AbortError", "TimeoutError", "FetchError"].includes(error.name);
+}
+
 const NOTIFY_API = "https://dashboard.alchemy.com/api";
+
+/**
+ * Hard ceiling on a single JSON-RPC round trip. Without it a hung endpoint would
+ * hold a lambda open until the platform killed the whole sweep, losing the summary
+ * of everything already processed.
+ */
+const RPC_TIMEOUT_MS = 15_000;
 
 /** keccak256("Transfer(address,address,uint256)"). */
 export const ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/**
+ * Configuration state for API/UI consumers.
+ *
+ * Deliberately carries no credentials: only whether each piece is present plus a
+ * machine-readable reason and a human-readable message. A missing RPC endpoint and
+ * an unusable network are reported as DIFFERENT reasons so a consumer can say
+ * exactly what an operator still has to set, instead of a generic failure.
+ */
+export type AlchemyMonitoringStatus = {
+  /** True when a usable JSON-RPC endpoint was resolved. */
+  enabled: boolean;
+  /** True when ALCHEMY_API_KEY or a full ALCHEMY_RPC_URL is present. */
+  rpcConfigured: boolean;
+  /** Configured network label in hostname form, when one could be resolved. */
+  network: string | null;
+  /** True when a webhook signing key is present. */
+  webhookConfigured: boolean;
+  /** True when a Notify token plus a webhook id/url allow address registration. */
+  registrationConfigured: boolean;
+  /** Distinct machine-readable reason the endpoint is unusable; null when enabled. */
+  reason: AlchemyUnconfiguredReason | null;
+  /** Human-readable explanation of `reason`; null when enabled. */
+  message: string | null;
+};
+
+export function alchemyMonitoringStatus(): AlchemyMonitoringStatus {
+  const cfg = alchemyConfig();
+  return {
+    enabled: cfg.enabled,
+    rpcConfigured: cfg.apiKeyConfigured,
+    network: cfg.network ?? null,
+    webhookConfigured: cfg.webhookConfigured,
+    registrationConfigured: cfg.addressRegistrationConfigured,
+    reason: cfg.unconfiguredReason,
+    message: cfg.message,
+  };
+}
 
 /** True when an Alchemy RPC endpoint is configured (notifications optional). */
 export function alchemyMonitoringEnabled(): boolean {
   return alchemyConfig().enabled;
 }
 
-/** True when webhook signature verification is possible. */
+/**
+ * True when webhook deliveries can be trusted AND attributed: a signing key to
+ * verify the HMAC, the Notify token and webhook id that identify the Address
+ * Activity webhook we registered, and an RPC endpoint to read confirmation depth
+ * from. Missing any of them means the webhook route stays closed rather than
+ * accepting deliveries it cannot verify or act on.
+ */
 export function alchemyWebhooksEnabled(): boolean {
   const cfg = alchemyConfig();
-  return cfg.webhookConfigured && Boolean(cfg.rpcUrl);
+  return Boolean(cfg.rpcUrl && cfg.webhookConfigured && cfg.notifyToken && cfg.webhookId);
 }
 
 /** True when deposit addresses can actually be registered on a Notify webhook. */
 export function alchemyRegistrationEnabled(): boolean {
   const cfg = alchemyConfig();
-  return cfg.addressRegistrationConfigured && Boolean(cfg.network);
+  return cfg.addressRegistrationConfigured && Boolean(cfg.rpcUrl);
 }
 
 /**
@@ -83,18 +157,57 @@ export function verifyAlchemyAuthToken(authorization: string | null): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * One JSON-RPC call against the configured endpoint.
+ *
+ * Every failure is mapped onto a distinct code so a caller can tell a temporary
+ * condition (429 rate limit, 5xx, timeout, unreachable) from a permanent one. The
+ * reconciliation sweep relies on that distinction: temporary failures become a
+ * partial-success summary and the work is retried on the next run, whereas a hard
+ * failure is reported as such.
+ */
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   const cfg = alchemyConfig();
-  if (!cfg.rpcUrl) throw new AlchemyError("Alchemy RPC is not configured", "ALCHEMY_UNCONFIGURED");
-  const response = await fetch(cfg.rpcUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    cache: "no-store",
-  });
-  if (!response.ok) throw new AlchemyError(`Alchemy RPC failed with status ${response.status}`, "ALCHEMY_HTTP_ERROR");
-  const payload = await response.json() as { result?: T; error?: { message?: string } };
-  if (payload.error) throw new AlchemyError(payload.error.message ?? "Alchemy RPC error", "ALCHEMY_RPC_ERROR");
+  if (!cfg.rpcUrl) throw new AlchemyError(cfg.message ?? "Alchemy RPC is not configured", cfg.unconfiguredReason ?? "ALCHEMY_UNCONFIGURED");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(cfg.rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    if (name === "AbortError" || name === "TimeoutError") {
+      throw new AlchemyError(`Alchemy RPC ${method} timed out after ${RPC_TIMEOUT_MS}ms`, "ALCHEMY_TIMEOUT");
+    }
+    throw new AlchemyError("Alchemy RPC endpoint could not be reached", "ALCHEMY_UNREACHABLE");
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    if (response.status === 429) throw new AlchemyError(`Alchemy RPC ${method} was rate limited`, "ALCHEMY_RATE_LIMITED");
+    if (response.status === 408 || response.status === 504) throw new AlchemyError(`Alchemy RPC ${method} timed out`, "ALCHEMY_TIMEOUT");
+    if (response.status >= 500) throw new AlchemyError(`Alchemy RPC ${method} failed with status ${response.status}`, "ALCHEMY_UPSTREAM_ERROR");
+    throw new AlchemyError(`Alchemy RPC failed with status ${response.status}`, "ALCHEMY_HTTP_ERROR");
+  }
+
+  const payload = await response.json() as { result?: T; error?: { message?: string; code?: number } };
+  if (payload.error) {
+    // -32603 (internal error) and -32005 (limit exceeded) are provider-side and
+    // temporary; anything else is reported as a plain RPC error.
+    const code = payload.error.code;
+    if (code === -32005 || code === -32603) {
+      throw new AlchemyError(payload.error.message ?? "Alchemy RPC is temporarily unavailable", "ALCHEMY_RATE_LIMITED");
+    }
+    throw new AlchemyError(payload.error.message ?? "Alchemy RPC error", "ALCHEMY_RPC_ERROR");
+  }
   return payload.result as T;
 }
 
@@ -235,6 +348,10 @@ function blockTag(value: bigint): string {
  * addressed to one watched deposit address. Filtering happens in the RPC call
  * itself (contract address + indexed `to` topic), so the payload can only ever
  * contain transfers of the configured token to the watched address.
+ *
+ * The caller is responsible for keeping [fromBlock, toBlock] inside one bounded
+ * window: an unbounded range is exactly what makes `eth_getLogs` time out or get
+ * rejected by the provider.
  */
 export async function fetchIncomingTokenLogs(params: {
   tokenAddress: string;
@@ -243,7 +360,9 @@ export async function fetchIncomingTokenLogs(params: {
   toBlock: bigint;
 }): Promise<TokenTransferLog[]> {
   const cfg = alchemyConfig();
-  if (!cfg.rpcUrl || !cfg.network) throw new AlchemyError("Alchemy RPC is not configured", "ALCHEMY_UNCONFIGURED");
+  // Only the endpoint is required: a full-URL configuration carries the network in
+  // the URL itself, so an unlabelled endpoint must not block the log scan.
+  if (!cfg.rpcUrl) throw new AlchemyError(cfg.message ?? "Alchemy RPC is not configured", cfg.unconfiguredReason ?? "ALCHEMY_UNCONFIGURED");
   if (!/^0x[0-9a-fA-F]{40}$/.test(params.tokenAddress)) throw new AlchemyError("Invalid token address for log scan", "ALCHEMY_INVALID_FILTER");
   const to = BigInt(params.toBlock);
   let from = BigInt(params.fromBlock);
@@ -303,51 +422,149 @@ export function transferLogToActivity(log: TokenTransferLog): AlchemyAddressActi
 }
 
 /**
- * Registers a funding address on the Alchemy Address Activity webhook so Alchemy
- * monitors it.
+ * Reasons a registration attempt never left this process because the Alchemy
+ * configuration itself is incomplete or unusable.
  *
- * IMPORTANT: this reports success only when Alchemy actually accepted the
- * registration. A missing Notify token, an unaccepted HTTP status, or an
- * unreachable dashboard returns `monitored: false` with a reason, and the caller
- * keeps the address in a retryable, not-yet-watched state. Registration is never
- * assumed to have worked.
+ * They are kept distinct from a real HTTP outcome so a caller can record the reason
+ * WITHOUT consuming one of the finite registration attempts: a missing credential
+ * says nothing at all about the address, and the address must become watched on the
+ * first run after the configuration is supplied.
  */
-export async function registerMonitoredAddress(address: string): Promise<{ monitored: boolean; reason?: string; webhookId?: string }> {
+export const ALCHEMY_REGISTRATION_CONFIG_REASONS = [
+  "alchemy_not_configured",
+  "alchemy_network_not_configured",
+  "alchemy_network_invalid",
+  "alchemy_rpc_url_invalid",
+  "alchemy_notify_unconfigured",
+  "alchemy_invalid_address",
+] as const;
+
+/** True when a registration failed purely because Alchemy is not configured. */
+export function isAlchemyRegistrationConfigReason(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  return (ALCHEMY_REGISTRATION_CONFIG_REASONS as readonly string[]).includes(reason);
+}
+
+/**
+ * Whether an address can be added to the Alchemy watch list right now, and if not,
+ * exactly why.
+ *
+ * The gates mirror the ones the rest of this module enforces: a usable JSON-RPC
+ * endpoint (ALCHEMY_API_KEY + a parsed ALCHEMY_NETWORK, or a complete
+ * ALCHEMY_RPC_URL) so a future delivery can be verified and confirmation depth read;
+ * a Notify token plus either an existing ALCHEMY_WEBHOOK_ID or an
+ * ALCHEMY_WEBHOOK_URL to create the webhook on. Creating a webhook also needs a
+ * network label, because Alchemy creates webhooks per network.
+ */
+export function alchemyRegistrationGate(): { ready: boolean; reason: string | null } {
   const cfg = alchemyConfig();
-  const notifyToken = cfg.notifyToken;
-  const webhookId = cfg.webhookId;
-  const webhookUrl = cfg.webhookUrl;
-  const network = cfg.network;
-  if (!cfg.apiKeyConfigured || !network) return { monitored: false, reason: "alchemy_unconfigured" };
-  if (!notifyToken) return { monitored: false, reason: "alchemy_notify_unconfigured" };
+  if (!cfg.rpcUrl) return { ready: false, reason: cfg.unconfiguredReason ?? "alchemy_not_configured" };
+  if (!cfg.notifyToken) return { ready: false, reason: "alchemy_notify_unconfigured" };
+  if (!cfg.webhookId && !cfg.webhookUrl) return { ready: false, reason: "alchemy_notify_unconfigured" };
+  if (!cfg.webhookId && cfg.webhookUrl && !cfg.network) return { ready: false, reason: "alchemy_network_not_configured" };
+  return { ready: true, reason: null };
+}
+
+/** Outcome of adding a batch of addresses to the Alchemy watch list. */
+export type AddressWatchRegistration = {
+  /** True when Alchemy accepted EVERY submitted address. */
+  monitored: boolean;
+  /** Addresses Alchemy accepted (empty when it refused the whole batch). */
+  accepted: string[];
+  /** Addresses Alchemy did not accept (empty when the batch was accepted). */
+  rejected: string[];
+  /** Machine-readable reason the batch was refused; absent on success. */
+  reason?: string;
+  /** Webhook the addresses now belong to, when Alchemy reported/confirmed one. */
+  webhookId?: string;
+};
+
+/**
+ * Adds addresses to the Alchemy Address Activity webhook — the watch list.
+ *
+ * Batched on purpose: a whole population of pre-existing server-side deposit
+ * addresses is registered in ONE Notify call instead of one call per address, so the
+ * lifecycle sweep can cover every wallet cheaply.
+ *
+ * Safe to repeat: Alchemy treats re-adding an already-watched address as a no-op,
+ * and callers only ever submit addresses they have NOT confirmed watched. Success is
+ * reported only when Alchemy actually accepted the addresses — a missing credential,
+ * an unaccepted HTTP status, or an unreachable dashboard returns `monitored: false`
+ * with a reason so the caller keeps the address in a retryable, not-yet-watched
+ * state.
+ */
+export async function registerMonitoredAddresses(addresses: string[]): Promise<AddressWatchRegistration> {
+  const unique = Array.from(new Set(
+    addresses.map((address) => address.trim().toLowerCase()).filter((address) => /^0x[0-9a-f]{40}$/.test(address)),
+  ));
+  if (unique.length === 0) return { monitored: false, accepted: [], rejected: [], reason: "alchemy_invalid_address" };
+
+  // Configuration gate FIRST: no HTTP call is attempted (and therefore no fake
+  // success is possible) when the deployment cannot register addresses yet.
+  const gate = alchemyRegistrationGate();
+  if (!gate.ready) {
+    return { monitored: false, accepted: [], rejected: [...unique], reason: gate.reason ?? "alchemy_not_configured" };
+  }
+
+  const cfg = alchemyConfig();
+  const notifyToken = cfg.notifyToken as string;
 
   try {
-    if (webhookId) {
+    if (cfg.webhookId) {
       const response = await fetch(`${NOTIFY_API}/update-webhook-addresses`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", "X-Alchemy-Token": notifyToken },
-        body: JSON.stringify({ webhook_id: webhookId, addresses_to_add: [address], addresses_to_remove: [] }),
+        body: JSON.stringify({ webhook_id: cfg.webhookId, addresses_to_add: unique, addresses_to_remove: [] }),
         cache: "no-store",
       });
-      if (!response.ok) return { monitored: false, reason: `alchemy_address_registration_failed_${response.status}` };
-      return { monitored: true, webhookId };
+      if (!response.ok) {
+        return { monitored: false, accepted: [], rejected: [...unique], reason: `alchemy_address_registration_failed_${response.status}` };
+      }
+      return { monitored: true, accepted: [...unique], rejected: [], webhookId: cfg.webhookId };
     }
-    if (webhookUrl) {
-      const response = await fetch(`${NOTIFY_API}/create-webhook`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Alchemy-Token": notifyToken },
-        body: JSON.stringify({ network: alchemyWebhookNetwork(network), webhook_type: "ADDRESS_ACTIVITY", webhook_url: webhookUrl, addresses: [address] }),
-        cache: "no-store",
-      });
-      if (!response.ok) return { monitored: false, reason: `alchemy_webhook_create_failed_${response.status}` };
-      const payload = await response.json().catch(() => null) as { data?: { id?: string } } | null;
-      const createdId = payload?.data?.id;
-      return { monitored: true, webhookId: typeof createdId === "string" ? createdId : undefined };
+
+    // Creating the webhook: the gate already proved a network label exists.
+    const network = cfg.network as string;
+    const response = await fetch(`${NOTIFY_API}/create-webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Alchemy-Token": notifyToken },
+      body: JSON.stringify({
+        network: alchemyWebhookNetwork(network),
+        webhook_type: "ADDRESS_ACTIVITY",
+        webhook_url: cfg.webhookUrl,
+        addresses: unique,
+      }),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return { monitored: false, accepted: [], rejected: [...unique], reason: `alchemy_webhook_create_failed_${response.status}` };
     }
-    return { monitored: false, reason: "alchemy_notify_unconfigured" };
+    const payload = await response.json().catch(() => null) as { data?: { id?: string } } | null;
+    const createdId = payload?.data?.id;
+    return { monitored: true, accepted: [...unique], rejected: [], webhookId: typeof createdId === "string" ? createdId : undefined };
   } catch {
-    return { monitored: false, reason: "alchemy_notify_unreachable" };
+    return { monitored: false, accepted: [], rejected: [...unique], reason: "alchemy_notify_unreachable" };
   }
+}
+
+/**
+ * Registers ONE funding address on the Alchemy Address Activity webhook so Alchemy
+ * monitors it.
+ *
+ * A thin wrapper over the batch call, so the single-address path and the lifecycle
+ * sweep share exactly one implementation of the Notify contract (and one definition
+ * of what "watched" means). The RPC endpoint may be configured EITHER as a bare
+ * ALCHEMY_API_KEY + ALCHEMY_NETWORK pair OR as a complete ALCHEMY_RPC_URL endpoint,
+ * so a full-URL deployment is a first-class configuration and must not short-circuit
+ * as "alchemy_unconfigured".
+ *
+ * IMPORTANT: this reports success only when Alchemy actually accepted the
+ * registration. The caller keeps the address in a retryable, not-yet-watched state
+ * on any other outcome; registration is never assumed to have worked.
+ */
+export async function registerMonitoredAddress(address: string): Promise<{ monitored: boolean; reason?: string; webhookId?: string }> {
+  const result = await registerMonitoredAddresses([address]);
+  return { monitored: result.monitored, reason: result.reason, webhookId: result.webhookId };
 }
 
 /** Alchemy network identifiers we accept as "the configured chain". */
