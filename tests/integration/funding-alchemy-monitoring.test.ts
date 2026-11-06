@@ -420,6 +420,8 @@ describe("Alchemy deposit monitoring", () => {
       const base = { fromAddress: "0xabc", toAddress: WALLET, txHash: TX, logIndex: 0, network: "robinhood-mainnet", category: "erc20", asset: null, tokenAddress: TOKEN_LOWER, rawAmount: "2000000", tokenDecimals: 6 };
 
       expect(validateTransfer(cfg, wallet, base).rejection).toBeNull();
+      // Alchemy's own webhook label for the configured network is the same chain.
+      expect(validateTransfer(cfg, wallet, { ...base, network: "ROBINHOOD_MAINNET" }).rejection).toBeNull();
       expect(validateTransfer(cfg, wallet, { ...base, tokenAddress: OTHER_WALLET }).rejection).toBe("wrong_token");
       expect(validateTransfer(cfg, wallet, { ...base, tokenAddress: null }).rejection).toBe("not_the_configured_token");
       expect(validateTransfer(cfg, wallet, { ...base, network: "ETH_MAINNET" }).rejection).toBe("wrong_chain");

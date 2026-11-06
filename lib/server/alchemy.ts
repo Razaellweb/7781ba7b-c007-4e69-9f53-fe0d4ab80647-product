@@ -336,7 +336,7 @@ export async function registerMonitoredAddress(address: string): Promise<{ monit
       const response = await fetch(`${NOTIFY_API}/create-webhook`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Alchemy-Token": notifyToken },
-        body: JSON.stringify({ network, webhook_type: "ADDRESS_ACTIVITY", webhook_url: webhookUrl, addresses: [address] }),
+        body: JSON.stringify({ network: alchemyWebhookNetwork(network), webhook_type: "ADDRESS_ACTIVITY", webhook_url: webhookUrl, addresses: [address] }),
         cache: "no-store",
       });
       if (!response.ok) return { monitored: false, reason: `alchemy_webhook_create_failed_${response.status}` };
@@ -357,7 +357,14 @@ export function networkMatchesConfiguredChain(observed: string | null): boolean 
   // chain id we already validated server-side.
   if (!configured) return true;
   if (!observed) return true;
-  return observed.toUpperCase() === configured.toUpperCase();
+  // Webhooks label the chain "ROBINHOOD_MAINNET"; the configured name is in
+  // hostname form ("robinhood-mainnet"). Compare them as the same identifier.
+  return alchemyWebhookNetwork(observed) === alchemyWebhookNetwork(configured);
+}
+
+/** A network name in the form Alchemy's Notify API uses ("ROBINHOOD_MAINNET"). */
+export function alchemyWebhookNetwork(network: string): string {
+  return network.trim().toUpperCase().replace(/-/g, "_");
 }
 
 /**

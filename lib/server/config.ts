@@ -308,6 +308,18 @@ export function assertFundingConfig(options: { networkRegistry?: UsdgNetworkRegi
 // an Alchemy Address Activity webhook (verified with the webhook's signing key) and
 // the fallback reconciliation reads the same account's JSON-RPC endpoint. Every
 // credential is server-only and never leaves this process.
+// ALCHEMY_NETWORK arrives in three shapes: the RPC hostname form
+// ("robinhood-mainnet"), Alchemy's webhook form ("ROBINHOOD_MAINNET"), or the
+// whole RPC URL copied from the Alchemy dashboard
+// ("https://robinhood-mainnet.g.alchemy.com/v2/<key>"). The network is kept in
+// hostname form; a pasted URL is also used as the RPC endpoint as-is.
+function parseAlchemyNetwork(raw: string | undefined): { network?: string; rpcUrl?: string } {
+  if (!raw) return {};
+  const url = raw.match(/^https:\/\/([a-z0-9-]+)\.g\.alchemy\.com\/v2\/[^/\s]+\/?$/i);
+  if (url) return { network: url[1].toLowerCase(), rpcUrl: raw.replace(/\/$/, "") };
+  return { network: raw.toLowerCase().replace(/_/g, "-") };
+}
+
 export function alchemyConfig() {
   const apiKey = optional("ALCHEMY_API_KEY");
   const signingKey = optional("ALCHEMY_WEBHOOK_SIGNING_KEY");
@@ -315,9 +327,10 @@ export function alchemyConfig() {
   const notifyToken = optional("ALCHEMY_NOTIFY_AUTH_TOKEN");
   const webhookId = optional("ALCHEMY_WEBHOOK_ID");
   const webhookUrl = optional("ALCHEMY_WEBHOOK_URL");
-  const network = optional("ALCHEMY_NETWORK") ?? optional("FUNDING_ALCHEMY_NETWORK");
+  const parsed = parseAlchemyNetwork(optional("ALCHEMY_NETWORK") ?? optional("FUNDING_ALCHEMY_NETWORK"));
+  const network = parsed.network;
   // Standard Alchemy HTTP endpoint shape: https://<network>.g.alchemy.com/v2/<key>
-  const rpcUrl = optional("ALCHEMY_RPC_URL") ?? (apiKey && network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : undefined);
+  const rpcUrl = optional("ALCHEMY_RPC_URL") ?? parsed.rpcUrl ?? (apiKey && network ? `https://${network}.g.alchemy.com/v2/${apiKey}` : undefined);
   return {
     apiKeyConfigured: Boolean(apiKey),
     /** Webhook signature verification is only possible with a signing key. */
