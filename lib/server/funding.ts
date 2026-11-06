@@ -332,6 +332,11 @@ export function validateTransfer(
  * webhook, a polled log, and a retried delivery all update one row. Rejected rows
  * are retained for audit and never credited.
  */
+// SET expressions read the existing row, so all three see the pre-update values.
+const REOPEN_REJECTED = `funding_deposits.status = 'rejected' AND EXCLUDED.status = 'pending'
+  AND funding_deposits.credited_at IS NULL AND funding_deposits.reorged_at IS NULL
+  AND funding_deposits.rejection_reason IS DISTINCT FROM 'transaction_reverted'`;
+
 export async function recordActivity(
   activity: AlchemyAddressActivity,
   wallet: FundingWalletRow,
@@ -361,7 +366,14 @@ export async function recordActivity(
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
      ON CONFLICT (chain_id, tx_hash, log_index) DO UPDATE
        SET last_checked_at = now(),
-           last_error = NULL
+           last_error = NULL,
+           -- A transfer an earlier rule refused (e.g. the chain label check before
+           -- it understood Alchemy's "ROBINHOOD_MAINNET") is re-opened when the
+           -- same transfer validates now. Never one already credited, reorged, or
+           -- found reverted on chain.
+           status = CASE WHEN ${REOPEN_REJECTED} THEN 'pending' ELSE funding_deposits.status END,
+           rejection_reason = CASE WHEN ${REOPEN_REJECTED} THEN NULL ELSE funding_deposits.rejection_reason END,
+           amount_micro_usd = CASE WHEN ${REOPEN_REJECTED} THEN EXCLUDED.amount_micro_usd ELSE funding_deposits.amount_micro_usd END
      RETURNING *`,
     [
       wallet.account_id,

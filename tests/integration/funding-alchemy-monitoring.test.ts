@@ -113,6 +113,14 @@ async function fakeQuery(text: string, values: unknown[] = []): Promise<Row[]> {
     );
     if (existing) {
       existing.last_checked_at = new Date();
+      existing.last_error = null;
+      // Mirrors REOPEN_REJECTED in recordActivity's ON CONFLICT clause.
+      if (existing.status === "rejected" && values[10] === "pending" && !existing.credited_at && !existing.reorged_at
+          && existing.rejection_reason !== "transaction_reverted") {
+        existing.status = "pending";
+        existing.rejection_reason = null;
+        existing.amount_micro_usd = String(values[9]);
+      }
       return [existing];
     }
     const row: Row = {
@@ -453,6 +461,60 @@ describe("Alchemy deposit monitoring", () => {
       expect(state.deposits[0].status).toBe("confirmed");
       expect(state.ledger).toHaveLength(1);
       expect(state.ledger[0].amount_micro_usd).toBe("2000000");
+    });
+
+    it("re-opens a transfer an earlier rule wrongly rejected once it validates, and credits it once", async () => {
+      const wallet = seedWatchedWallet();
+      // What the deployed code left behind: Alchemy's "ROBINHOOD_MAINNET" label
+      // was compared literally with "robinhood-mainnet" and refused.
+      state.deposits.push({
+        id: "deposit-old", account_id: wallet.account_id, funding_wallet_id: wallet.id, chain_id: 4663, token_address: TOKEN_LOWER,
+        tx_hash: TX, log_index: 0, from_address: "0xabc", to_address: WALLET, amount_raw: "1000000", amount_micro_usd: "0",
+        status: "rejected", rejection_reason: "wrong_chain", idempotency_key: `4663:${TX}:0`, confirmations: 0, ledger_entry_id: null,
+        attempts: 0, last_error: null, first_seen_at: new Date(), last_checked_at: new Date(), confirmed_at: null, credited_at: null,
+        block_number: null, block_hash: null, reorged_at: null, reorg_reason: null, credit_reversed: false,
+      });
+      const { ingestActivities } = await import("../../lib/server/funding");
+      const activity = { fromAddress: "0xabc", toAddress: WALLET, txHash: TX, logIndex: 0, network: "ROBINHOOD_MAINNET", category: "erc20", asset: null, tokenAddress: TOKEN_LOWER, rawAmount: "1000000", tokenDecimals: 6 };
+      receipt.current = { blockNumber: 100, blockHash: "0x" + "11".repeat(32), status: "0x1" };
+      head.current = 105n;
+
+      const first = await ingestActivities([activity]);
+      await ingestActivities([activity]);
+
+      expect(first.credited).toBe(1);
+      expect(state.deposits).toHaveLength(1);
+      expect(state.deposits[0].status).toBe("confirmed");
+      expect(state.deposits[0].rejection_reason).toBeNull();
+      expect(state.ledger).toHaveLength(1);
+      expect(state.ledger[0].amount_micro_usd).toBe("1000000");
+    });
+
+    it("keeps a rejection when the transfer still fails validation or was reverted on chain", async () => {
+      const wallet = seedWatchedWallet();
+      const base = {
+        account_id: wallet.account_id, funding_wallet_id: wallet.id, chain_id: 4663, token_address: TOKEN_LOWER, log_index: 0,
+        from_address: "0xabc", to_address: WALLET, amount_raw: "1000000", amount_micro_usd: "0", status: "rejected", confirmations: 0,
+        ledger_entry_id: null, attempts: 0, last_error: null, first_seen_at: new Date(), last_checked_at: new Date(), confirmed_at: null,
+        credited_at: null, block_number: null, block_hash: null, reorged_at: null, reorg_reason: null, credit_reversed: false,
+      };
+      const TX2 = "0x" + "cd".repeat(32);
+      state.deposits.push({ ...base, id: "d-chain", tx_hash: TX, rejection_reason: "wrong_chain", idempotency_key: `4663:${TX}:0` });
+      state.deposits.push({ ...base, id: "d-reverted", tx_hash: TX2, rejection_reason: "transaction_reverted", idempotency_key: `4663:${TX2}:0` });
+      const { ingestActivities } = await import("../../lib/server/funding");
+      receipt.current = { blockNumber: 100, blockHash: "0x" + "11".repeat(32), status: "0x1" };
+      head.current = 105n;
+
+      await ingestActivities([
+        { fromAddress: "0xabc", toAddress: WALLET, txHash: TX, logIndex: 0, network: "ETH_MAINNET", category: "erc20", asset: null, tokenAddress: TOKEN_LOWER, rawAmount: "1000000", tokenDecimals: 6 },
+        { fromAddress: "0xabc", toAddress: WALLET, txHash: TX2, logIndex: 0, network: "ROBINHOOD_MAINNET", category: "erc20", asset: null, tokenAddress: TOKEN_LOWER, rawAmount: "1000000", tokenDecimals: 6 },
+      ]);
+
+      expect(state.deposits.map((d) => [d.id, d.status, d.rejection_reason])).toEqual([
+        ["d-chain", "rejected", "wrong_chain"],
+        ["d-reverted", "rejected", "transaction_reverted"],
+      ]);
+      expect(state.ledger).toHaveLength(0);
     });
 
     it("credits a duplicate delivery exactly once", async () => {
