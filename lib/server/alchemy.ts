@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { alchemyConfig, type AlchemyUnconfiguredReason } from "./config";
+import { alchemyConfig, type AlchemyUnconfiguredReason, fundingReconcileConfig } from "./config";
 
 // Alchemy is the ONLY chain-monitoring provider in this funding flow.
 //
@@ -169,12 +169,21 @@ export function verifyAlchemyAuthToken(authorization: string | null): boolean {
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   const cfg = alchemyConfig();
   if (!cfg.rpcUrl) throw new AlchemyError(cfg.message ?? "Alchemy RPC is not configured", cfg.unconfiguredReason ?? "ALCHEMY_UNCONFIGURED");
+  return rpcAt<T>(cfg.rpcUrl, method, params);
+}
+
+/** The endpoint the polling sweep reads logs and the head from. */
+function logScanRpcUrl(): string | undefined {
+  return fundingReconcileConfig().logsRpcUrl ?? alchemyConfig().rpcUrl;
+}
+
+async function rpcAt<T>(url: string, method: string, params: unknown[]): Promise<T> {
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(cfg.rpcUrl, {
+    response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -215,6 +224,24 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
 export async function getBlockNumber(): Promise<bigint> {
   const hex = await rpc<string>("eth_blockNumber", []);
   return BigInt(hex);
+}
+
+/**
+ * Chain head on the log-scan endpoint, which the sweep's windows must not pass.
+ * Refuses an endpoint on a different chain, so a misconfigured URL can never feed
+ * another network's transfers into crediting.
+ */
+export async function getLogScanHead(expectedChainId: number): Promise<bigint> {
+  const url = logScanRpcUrl();
+  if (!url) {
+    const cfg = alchemyConfig();
+    throw new AlchemyError(cfg.message ?? "Alchemy RPC is not configured", cfg.unconfiguredReason ?? "ALCHEMY_UNCONFIGURED");
+  }
+  const chainId = Number(BigInt(await rpcAt<string>(url, "eth_chainId", [])));
+  if (chainId !== expectedChainId) {
+    throw new AlchemyError(`Log-scan RPC is on chain ${chainId}, expected ${expectedChainId}`, "ALCHEMY_WRONG_CHAIN");
+  }
+  return BigInt(await rpcAt<string>(url, "eth_blockNumber", []));
 }
 
 export type TransactionReceiptInfo = {
@@ -290,6 +317,7 @@ export function parseAddressActivity(payload: unknown): AlchemyAddressActivity[]
     const activity = entry as {
       fromAddress?: string; toAddress?: string; hash?: string; blockNum?: string;
       logIndex?: string | number; category?: string; asset?: string; network?: string;
+      log?: { logIndex?: string | number } | null;
       rawContract?: { address?: string | null; rawValue?: string | null; decimal?: string | number | null };
     };
     const hash = typeof activity.hash === "string" ? activity.hash.toLowerCase() : null;
@@ -298,7 +326,10 @@ export function parseAddressActivity(payload: unknown): AlchemyAddressActivity[]
     const tokenAddress = typeof contract === "string" && /^0x[0-9a-fA-F]{40}$/.test(contract) ? contract.toLowerCase() : null;
     const decimalRaw = activity.rawContract?.decimal;
     const decimals = decimalRaw == null ? null : Number(hexToDecimalString(String(decimalRaw)) ?? decimalRaw);
-    const logIndexRaw = activity.logIndex;
+    // Token transfers carry their log index under `log` (the raw receipt log);
+    // it must match the on-chain index the polling sweep reads, or one transfer
+    // gets two deposit identities and is credited twice.
+    const logIndexRaw = activity.log?.logIndex ?? activity.logIndex;
     const logIndex = logIndexRaw == null ? 0 : Number(hexToDecimalString(String(logIndexRaw)) ?? logIndexRaw) || 0;
     parsed.push({
       fromAddress: typeof activity.fromAddress === "string" ? activity.fromAddress.toLowerCase() : null,
@@ -369,7 +400,8 @@ export async function fetchIncomingTokenLogs(params: {
   if (from < 0n) from = 0n;
   if (to < from) return [];
 
-  const logs = await rpc<Array<{ address?: string; topics?: string[]; data?: string; transactionHash?: string; logIndex?: string; blockNumber?: string; removed?: boolean }>>(
+  const logs = await rpcAt<Array<{ address?: string; topics?: string[]; data?: string; transactionHash?: string; logIndex?: string; blockNumber?: string; removed?: boolean }>>(
+    logScanRpcUrl() as string,
     "eth_getLogs",
     [{
       fromBlock: blockTag(from),

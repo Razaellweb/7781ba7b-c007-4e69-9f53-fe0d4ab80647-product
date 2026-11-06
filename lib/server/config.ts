@@ -471,6 +471,10 @@ export function fundingReconcileConfig() {
     cronSecret: optional("CRON_SECRET"),
     maxWalletsPerRun: Math.max(1, integer("FUNDING_RECONCILE_MAX_WALLETS", 25)),
     maxChunkBlocks: Math.max(100, integer("FUNDING_RECONCILE_CHUNK_BLOCKS", 5000)),
+    // The polling sweep's eth_getLogs endpoint. Alchemy's free plan caps eth_getLogs
+    // at a 10-block range, far below one sweep window, so the scan prefers a chain
+    // RPC without that cap (Robinhood Chain's public RPC) and falls back to Alchemy.
+    logsRpcUrl: optional("FUNDING_LOGS_RPC_URL") ?? optional("ROBINHOOD_RPC_URL"),
     reorgDepthBlocks: Math.max(1, integer("FUNDING_REORG_DEPTH", 12)),
     maxRegistrationAttempts: Math.max(1, integer("FUNDING_REGISTRATION_MAX_ATTEMPTS", 8)),
   };

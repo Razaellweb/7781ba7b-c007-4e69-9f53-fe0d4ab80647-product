@@ -145,6 +145,7 @@ vi.mock("../../lib/server/alchemy", async () => {
   return {
     ...actual,
     getBlockNumber: async () => head.current,
+    getLogScanHead: async () => head.current,
     getTransactionReceiptInfo: async () => receipt.current,
     fetchIncomingTokenLogs: async (params: { fromBlock: bigint; toBlock: bigint; toAddress: string }) => {
       const callIndex = logCalls.length;

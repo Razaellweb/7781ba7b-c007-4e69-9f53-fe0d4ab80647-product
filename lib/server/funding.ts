@@ -5,6 +5,7 @@ import {
   AlchemyError,
   fetchIncomingTokenLogs,
   getBlockNumber,
+  getLogScanHead,
   getTransactionReceiptInfo,
   isAlchemyRegistrationConfigReason,
   isAlchemyTransient,
@@ -889,7 +890,7 @@ export async function reconcileWallet(
 
   let head: bigint;
   try {
-    head = await getBlockNumber();
+    head = await getLogScanHead(cfg.chainId);
   } catch (error) {
     const failure = reconcileFailure(error);
     console.warn(JSON.stringify({ event: "funding_reconcile_head_unavailable", walletId: wallet.id, reason: failure.reason, transient: failure.transient }));

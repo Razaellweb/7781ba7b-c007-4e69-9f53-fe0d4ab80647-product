@@ -245,6 +245,7 @@ vi.mock("../../lib/server/alchemy", async () => {
     ...actual,
     getTransactionReceiptInfo: async () => receipt.current,
     getBlockNumber: async () => head.current,
+    getLogScanHead: async () => head.current,
     fetchIncomingTokenLogs: async () => logs.current,
   };
 });
