@@ -23,6 +23,10 @@ import {
 // current. If the next block cannot be reserved, the machine is destroyed when
 // the paid block ends. Stopping mid-block settles only the minutes used.
 //
+// A block is all-or-nothing, so both reservations ask for `requireFullEstimate`:
+// reserveCompute clamps inference holds to the available balance, and a partially
+// paid block would let a machine run past the right it actually bought.
+//
 // Nothing here needs a scheduler. A rental advances whenever it is synced:
 //   - every minute from the machine itself (lease heartbeat),
 //   - whenever its owner opens the GPU page,
@@ -132,7 +136,8 @@ export function proratedCostMicroUsd(hourlyRate: bigint, elapsedMs: number, bloc
 }
 
 // transaction() wraps every failure in DatabaseError, so an AccountingError
-// thrown by reserveCompute arrives as its `cause`.
+// thrown by reserveCompute (INSUFFICIENT_COMPUTE when the balance cannot cover the
+// whole block, including a zero balance) arrives as its `cause`.
 export function accountingCause(error: unknown): AccountingError | null {
   let current: unknown = error;
   while (current instanceof Error) {
@@ -299,7 +304,9 @@ async function advance(initial: RentalRow, now: number): Promise<RentalRow> {
     if (!rental.next_operation_key) {
       const nextKey = operationKey(rental.id, rental.block_index + 1);
       try {
-        await reserveCompute(rental.account_id, nextKey, blockCost, { channel: "gpu" });
+        // The next block must be paid in full or the machine will be stopped when
+        // this one ends; a clamped partial hold would be a silently short block.
+        await reserveCompute(rental.account_id, nextKey, blockCost, { channel: "gpu", requireFullEstimate: true });
         rental = await saveRental(rental, { next_operation_key: nextKey, renewal_blocked: false });
       } catch (error) {
         if (!accountingCause(error)) throw error;
@@ -403,7 +410,9 @@ export async function launchRental(accountId: string, request: LaunchRequest, re
 
   const blockCost = blockCostMicroUsd(hourlyRate, cfg.blockMinutes);
   try {
-    await reserveCompute(accountId, firstKey, blockCost, { channel: "gpu" });
+    // The first block is prepaid in full: a balance that cannot cover it must not
+    // start a machine, so this never accepts a clamped partial hold.
+    await reserveCompute(accountId, firstKey, blockCost, { channel: "gpu", requireFullEstimate: true });
   } catch (error) {
     rental = await saveRental(rental, { status: "failed", end_reason: "launch_failed", ended_at: new Date(), current_operation_key: null });
     const accounting = accountingCause(error);
@@ -560,4 +569,3 @@ export function publicRental(rental: RentalRow) {
     } : null,
   };
 }
-

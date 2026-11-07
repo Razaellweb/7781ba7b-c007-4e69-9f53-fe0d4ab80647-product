@@ -56,12 +56,38 @@ export async function ensureDefaultAllowance(accountId: string): Promise<GrantRo
   return issueGrant(accountId, start, end);
 }
 
-export async function reserveCompute(accountId: string, operationKey: string, estimate: MicroUsd, options: { apiKeyId?: string; channel?: AccountingChannel } = {}) {
+export type ReserveComputeOptions = {
+  apiKeyId?: string;
+  channel?: AccountingChannel;
+  /**
+   * When true the whole `estimate` must be available or the reservation is
+   * rejected. Prepaid GPU blocks rely on this (a block is either fully paid for
+   * or the machine must not launch/continue), so it defaults to true for the
+   * "gpu" channel and false everywhere else.
+   */
+  requireFullEstimate?: boolean;
+};
+
+// Holds compute for an in-flight operation. `estimate` is the most this operation
+// may hold — inference callers pass the configured reservation cap
+// (INFERENCE_RESERVATION_CAP_MICRO_USD, default $0.50). The hold is clamped to what
+// the account can actually cover, so a small funded balance still reserves that
+// small amount instead of being refused for not reaching the cap:
+//   available >= estimate   -> reserve estimate (the cap)
+//   0 < available < estimate -> reserve available
+//   available <= 0          -> rejected with INSUFFICIENT_COMPUTE
+// The balance read, the clamp, and the reservation insert all run inside the same
+// transaction that holds the account row lock, so two concurrent requests cannot
+// both reserve the same balance.
+export async function reserveCompute(accountId: string, operationKey: string, estimate: MicroUsd, options: ReserveComputeOptions = {}) {
   if (estimate <= 0n) throw new AccountingError("Reservation must be positive");
   const channel = options.channel ?? (options.apiKeyId ? "api_key" : "app");
+  const requireFullEstimate = options.requireFullEstimate ?? channel === "gpu";
   return transaction(async db => {
     const existing = await db.query(`SELECT * FROM compute_reservations WHERE account_id=$1 AND operation_key=$2`, [accountId, operationKey]);
     if (existing.rowCount) return existing.rows[0];
+    // Serializes every reservation for this account, so the balance read below and
+    // the hold written from it cannot interleave with another request's hold.
     await db.query(`SELECT id FROM user_accounts WHERE id=$1 FOR UPDATE`, [accountId]);
     // A grant only contributes while it is inside its period; every other credit
     // (a released hold, a refund, a credited funding deposit, an operator
@@ -70,10 +96,18 @@ export async function reserveCompute(accountId: string, operationKey: string, es
     // spend from and is rejected here rather than being extended a placeholder.
     const balance = await db.query<{ available: string }>(AVAILABLE_BALANCE_SQL, [accountId]);
     const available = BigInt(balance.rows[0]?.available ?? "0");
-    if (available <= 0n) throw new AccountingError("No compute balance is available. Fund the wallet to add compute", "ALLOWANCE_MISSING");
-    if (available < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
-    const reservation = await db.query(`INSERT INTO compute_reservations (account_id, operation_key, reserved_micro_usd, status, api_key_id, channel) VALUES ($1,$2,$3,'reserved',$4,$5) RETURNING *`, [accountId, operationKey, estimate.toString(), options.apiKeyId ?? null, channel]);
-    await db.query(`INSERT INTO compute_ledger_entries (account_id, reservation_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'reservation',$3,$4,$5)`, [accountId, reservation.rows[0].id, estimate.toString(), `reserve:${operationKey}`, JSON.stringify({ channel, apiKeyId: options.apiKeyId ?? null })]);
+    // An exhausted balance is rejected outright: without this check the clamp below
+    // would compute a zero hold, and a zero-value reservation must never be written
+    // because it would bypass the balance check entirely.
+    if (available <= 0n) throw new AccountingError("No compute balance is available. Fund the wallet to add compute", "INSUFFICIENT_COMPUTE");
+    if (requireFullEstimate && available < estimate) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
+    // Clamped under the lock: never hold more than the account can cover, and never
+    // more than the requested estimate. A positive balance therefore always yields
+    // a positive hold.
+    const reserved = available < estimate ? available : estimate;
+    if (reserved <= 0n) throw new AccountingError("Insufficient available compute", "INSUFFICIENT_COMPUTE");
+    const reservation = await db.query(`INSERT INTO compute_reservations (account_id, operation_key, reserved_micro_usd, status, api_key_id, channel) VALUES ($1,$2,$3,'reserved',$4,$5) RETURNING *`, [accountId, operationKey, reserved.toString(), options.apiKeyId ?? null, channel]);
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, reservation_id, entry_type, amount_micro_usd, idempotency_key, metadata) VALUES ($1,$2,'reservation',$3,$4,$5)`, [accountId, reservation.rows[0].id, reserved.toString(), `reserve:${operationKey}`, JSON.stringify({ channel, apiKeyId: options.apiKeyId ?? null, requestedMicroUsd: estimate.toString(), availableMicroUsd: available.toString() })]);
     return reservation.rows[0];
   });
 }

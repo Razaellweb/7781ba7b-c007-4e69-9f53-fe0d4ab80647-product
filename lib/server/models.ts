@@ -39,6 +39,22 @@ export type ModelRow = {
   provider_sync_error: string | null;
 };
 
+// Function calling is advertised upstream as the `tools` request parameter, so the
+// synced provider catalog is the only authority on whether a model may receive
+// tool definitions. Nothing is assumed when metadata is missing.
+export const TOOLS_PARAMETER = "tools";
+
+/**
+ * True only when the model's synced provider metadata explicitly lists `tools`.
+ * Every tool-related path (gateway validation and in-app orchestration) reads this,
+ * so a model without confirmed support can never be sent tools.
+ */
+export function modelSupportsTools(model: ModelRow | null | undefined): boolean {
+  const parameters = model?.provider_metadata?.supportedParameters;
+  if (!Array.isArray(parameters)) return false;
+  return parameters.some((parameter) => parameter.toLowerCase() === TOOLS_PARAMETER);
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }

@@ -20,6 +20,22 @@ const positiveBalance = (value: string) => { try { return BigInt(value || "0") >
 const timeLabel = (value: string) => { const time = new Date(value).getTime(); if (!Number.isFinite(time)) return ""; const minutes = Math.floor(Math.max(0, Date.now() - time) / 60000); return minutes < 1 ? "just now" : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`; };
 const usableKey = (key: ApiKey) => !key.revoked_at && Array.isArray(key.scopes) && key.scopes.includes("chat:write");
 
+// The backend returns the FIRST reason that blocks a request (identity, then the
+// account API key gate, then provider health, then the compute allowance), so the
+// status line only renders the reason it was actually handed and never infers a
+// competing one locally. Codes outside this map keep the existing generic
+// fallback, which shows the server's own safe message.
+const blockedMessage = (code?: string): string | null => {
+  if (code === "API_KEY_REQUIRED") return "This account has no active API key. Create a key to send a message.";
+  if (code === "INSUFFICIENT_COMPUTE") return "Insufficient compute. Add compute to this workspace to continue.";
+  if (code === "PROVIDER_DEGRADED") return "Inference is temporarily unavailable while the model provider recovers. Try again shortly.";
+  return null;
+};
+const connectionMessage = "Could not reach the server. Check your connection and try again.";
+// A rejected request (as opposed to a broken stream or a network fault) carries
+// whether a retry could resolve it, which decides if the status line offers one.
+class BlockedRequestError extends Error { constructor(message: string, readonly retryable = false) { super(message); this.name = "BlockedRequestError"; } }
+
 function PlaygroundContent() {
   const { ready: authReady, authenticated, getAccessToken } = usePrivy();
   const router = useRouter();
@@ -46,6 +62,9 @@ function PlaygroundContent() {
   const abortRef = useRef<AbortController | null>(null);
   const operationRef = useRef<string | null>(null);
   const loadIdRef = useRef(0);
+  // Monotonic submit sequence. Only the newest request may write status, error or
+  // stream state, so a superseded response can never overwrite the latest one.
+  const requestSeqRef = useRef(0);
 
   const authHeaders = useCallback(async () => { const token = await getAccessToken(); if (!token) throw new Error("AUTH_REQUIRED"); return { Authorization: `Bearer ${token}` }; }, [getAccessToken]);
   const availableModels = useMemo(() => models.filter(operational), [models]);
@@ -176,36 +195,70 @@ function PlaygroundContent() {
     // No active account key means nothing is dispatched to /api/chat, even when
     // the request is triggered programmatically rather than from the composer.
     if (!text || !model || !activeKey || !canSubmit || !operational(model)) return;
-    const requestId = crypto.randomUUID(); const requestModel = model; const authorizingKeyId = activeKey.id; const controller = new AbortController(); abortRef.current = controller; operationRef.current = requestId; setDraft(""); setError(""); setStatus("streaming");
+    // Each submit takes a new sequence number. Only the newest request is allowed
+    // to publish status, error and stream state, so a slow or superseded response
+    // (rapid submits, a retry racing a winding-down stream) cannot overwrite the
+    // status of the request the user is actually waiting on.
+    const sequence = ++requestSeqRef.current;
+    const isLatest = () => requestSeqRef.current === sequence;
+    const requestId = crypto.randomUUID(); const requestModel = model; const authorizingKeyId = activeKey.id;
+    abortRef.current?.abort();
+    const controller = new AbortController(); abortRef.current = controller; operationRef.current = requestId; setDraft(""); setError(""); setStatus("streaming");
     setMessages((current) => { const next = [...current]; if (retryText && next.at(-1)?.role === "assistant" && next.at(-2)?.role === "user" && next.at(-2)?.content === text) next.pop(); else next.push({ role: "user", content: text }); next.push({ role: "assistant", content: "", partial: true }); return next; });
     let terminal = false;
     try {
       const headers = await authHeaders();
+      if (!isLatest()) return;
       const response = await fetch("/api/chat", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, signal: controller.signal, body: JSON.stringify({ conversationId, message: text, model: requestModel.id, apiKeyId: authorizingKeyId, operationKey: requestId, clientRequestId: requestId, parameters: { systemPrompt: parameters.systemPrompt || undefined, temperature: parameters.temperature === "" ? undefined : Number(parameters.temperature), topP: parameters.topP === "" ? undefined : Number(parameters.topP), maxTokens: parameters.maxTokens === "" ? undefined : Number(parameters.maxTokens), seed: parameters.seed === "" ? undefined : Number(parameters.seed), stop: parameters.stop ? parameters.stop.split(String.fromCharCode(10)) : undefined } }) });
+      if (!isLatest()) return;
       if (!response.ok) {
-        const body = await response.json().catch(() => ({})) as { error?: string; code?: string };
-        if (response.status === 403 && typeof body.code === "string" && body.code.startsWith("API_KEY")) { void refreshKeys().catch(() => undefined); throw new Error(body.error || "You need an API key to use the Playground"); }
-        if (response.status === 402 || body.code === "INSUFFICIENT_COMPUTE" || body.code === "ALLOWANCE_MISSING" || body.code === "ALLOWANCE_EXPIRED") { setBalance("0"); setBalanceLoaded(false); throw new Error(body.error || "Insufficient compute allowance."); }
-        if (response.status === 401) { throw new Error(body.error || "Your session has expired. Sign in again."); }
-        throw new Error(body.error || "The Playground request was rejected.");
+        const body = await response.json().catch(() => ({})) as { error?: string; code?: string; retryable?: boolean };
+        if (!isLatest()) return;
+        const code = typeof body.code === "string" ? body.code : undefined;
+        // A revoked, missing or scoped-out key is a key-state problem: re-read the
+        // account keys so the key gate reflects reality instead of stale state.
+        if (code && code.startsWith("API_KEY")) void refreshKeys().catch(() => undefined);
+        // The server refuses a reservation only when nothing is spendable, so the
+        // fresh read is an authoritative zero. Keeping it marked loaded leaves the
+        // existing in-place allowance refresh usable once compute is topped up.
+        if (response.status === 402 || code === "INSUFFICIENT_COMPUTE" || code === "ALLOWANCE_MISSING" || code === "ALLOWANCE_EXPIRED") { setBalance("0"); setBalanceLoaded(true); }
+        if (response.status === 401) throw new BlockedRequestError("Your session has expired. Sign in again.", false);
+        if (response.status === 429) throw new BlockedRequestError(body.error || "Too many requests. Try again shortly.", true);
+        // The backend already chose the first blocking reason (identity, then the
+        // key gate, then provider health, then the allowance); surface exactly that
+        // one. Unmapped codes keep the existing generic fallback.
+        const mapped = blockedMessage(code);
+        if (mapped) throw new BlockedRequestError(mapped, code === "PROVIDER_DEGRADED" || Boolean(body.retryable));
+        throw new BlockedRequestError(body.error || "The Playground request was rejected.", Boolean(body.retryable));
       }
       if (!response.body) throw new Error("The response stream was unavailable; completion was not confirmed.");
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
       const processEvent = (event: string) => {
+        if (!isLatest()) return;
         const line = event.split(String.fromCharCode(10)).find((item) => item.startsWith("data: "));
         if (!line) return;
-        const payload = JSON.parse(line.slice(6)) as { type?: string; text?: string; conversationId?: string; error?: string };
+        const payload = JSON.parse(line.slice(6)) as { type?: string; text?: string; conversationId?: string; error?: string; retryable?: boolean };
         if (payload.type === "delta" && payload.text) setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, content: item.content + payload.text } : item));
-        else if (payload.type === "complete") { terminal = true; if (payload.conversationId) { setConversationId(payload.conversationId); router.replace(`/chat?${new URLSearchParams({ model: requestModel.id, conversation: payload.conversationId })}`); } setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, partial: false } : item)); setStatus("ready"); }
+        else if (payload.type === "complete") { terminal = true; if (payload.conversationId) { setConversationId(payload.conversationId); router.replace(`/chat?${new URLSearchParams({ model: requestModel.id, conversation: payload.conversationId })}`); } setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, partial: false } : item)); setError(""); setStatus("ready"); }
         else if (payload.type === "cancelled") { terminal = true; setStatus("stopped"); setError("Generation stopped. The visible response is partial."); }
-        else if (payload.type === "error") throw new Error(payload.error || "Inference failed before completion.");
+        // Provider failures during the stream carry their own retryable flag, so a
+        // transient outage offers a retry while a permanent one does not.
+        else if (payload.type === "error") throw new BlockedRequestError(payload.error || "Inference failed before completion.", Boolean(payload.retryable));
       };
       const eventDelimiter = String.fromCharCode(10, 10);
-      while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const events = buffer.split(eventDelimiter); buffer = events.pop() ?? ""; for (const item of events) processEvent(item); }
+      while (true) { const { done, value } = await reader.read(); if (done) break; if (!isLatest()) { await reader.cancel().catch(() => undefined); return; } buffer += decoder.decode(value, { stream: true }); const events = buffer.split(eventDelimiter); buffer = events.pop() ?? ""; for (const item of events) processEvent(item); }
       buffer += decoder.decode(); if (buffer.trim()) processEvent(buffer);
+      if (!isLatest()) return;
       if (!terminal) throw new Error("The response stream ended before a completion event arrived.");
       if (!controller.signal.aborted) void refreshHistory().catch(() => undefined);
-    } catch (caught) { if (controller.signal.aborted) { setStatus("stopped"); setError("Generation stopped. The visible response is partial."); } else { setStatus("failed"); setError(caught instanceof Error ? caught.message : "The Playground request failed."); } }
+    } catch (caught) {
+      // A superseded request never touches the status line: the newest request owns it.
+      if (!isLatest()) return;
+      if (caught instanceof BlockedRequestError) { setStatus(caught.retryable ? "failed" : "unavailable"); setError(caught.message); }
+      else if (controller.signal.aborted) { setStatus("stopped"); setError("Generation stopped. The visible response is partial."); }
+      else if (caught instanceof TypeError) { setStatus("failed"); setError(connectionMessage); }
+      else { setStatus("failed"); setError(caught instanceof Error && caught.message ? caught.message : "The Playground request failed."); }
+    }
     finally { if (abortRef.current === controller) abortRef.current = null; if (operationRef.current === requestId) operationRef.current = null; }
   };
 
@@ -215,6 +268,9 @@ function PlaygroundContent() {
   const lastUser = [...messages].reverse().find((message) => message.role === "user")?.content;
   const statusCopy = status === "loading" ? "Loading models and workspace data..." : status === "unavailable" || status === "failed" || status === "stopped" ? error : status === "streaming" ? `Generating with ${model?.displayName ?? "the selected model"}...` : !model ? error || "Choose an available model to begin." : !operational(model) ? "This model is unavailable. No provider request can be made." : zeroCompute ? "No compute allowance is available. Refresh the allowance to continue." : "";
   const statusTone = status === "failed" || status === "unavailable" || zeroCompute || !model || !operational(model) ? "error" : status === "stopped" ? "stopped" : status === "streaming" ? "streaming" : "";
+  // Retry is only offered for a retryable failure, and only while the inputs the
+  // server needs are actually present (active key, spendable balance, model).
+  const canRetryLast = status === "failed" && Boolean(lastUser) && hasActiveKey && balanceLoaded && positiveBalance(balance) && operational(model);
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (canSubmit) void submit(); } };
 
   return <main className="playground-shell"><header className="playground-topbar"><button className="playground-back" onClick={() => router.push("/dashboard")}><span aria-hidden="true">←</span> Overview</button><span className="topbar-current">PLAYGROUND</span><div className="topbar-status"><span className={`playground-balance ${zeroCompute ? "zero" : ""}`}>{balanceLoaded ? balanceLabel(balance) : "—"}<small>available compute</small></span></div></header>
@@ -225,7 +281,7 @@ function PlaygroundContent() {
       <div className="conversation-toolbar"><div><span className="playground-kicker">YOUR CONVERSATION</span><span className="conversation-model">{model?.displayName ?? "Select a model"}</span></div><div className="conversation-actions"><button type="button" className="history-toggle" aria-expanded={showHistory} onClick={() => setShowHistory((current) => !current)}>History{conversations.length ? <span>{conversations.length}</span> : null}</button><button type="button" className="new-conversation" onClick={newConversation} disabled={status === "streaming"}>+ New chat</button></div></div>
       {showHistory && <section className="history-panel" aria-label="Conversation history"><div className="history-search-wrap"><input type="search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="Search conversations..." aria-label="Search conversations" /><button type="button" onClick={() => void refreshHistory().catch((caught) => setError(caught instanceof Error ? caught.message : "History could not be refreshed."))}>Refresh</button></div>{filteredHistory.length ? <div className="history-list">{filteredHistory.map((item) => <button type="button" key={item.id} className={conversationId === item.id ? "active" : ""} onClick={() => void openConversation(item.id)}><span>{item.title || "New conversation"}</span><small>{timeLabel(item.updated_at)}{item.message_count != null ? ` · ${item.message_count} messages` : ""}</small></button>)}</div> : <p className="history-empty">{conversations.length ? "No conversations match that search." : "Your conversations will appear here."}</p>}</section>}
       <div className="playground-messages" aria-live="polite">{messages.length === 0 ? <div className="playground-empty"><div className="empty-mark" aria-hidden="true">✦</div><span className="empty-overline">A QUIET SPACE FOR GOOD QUESTIONS</span><h2>What would you like to work through?</h2><p>Choose a model and send a prompt. Responses stream into your conversation history.</p></div> : messages.map((message, index) => <article className={`playground-message ${message.role} ${message.partial ? "partial" : ""}`} key={`${index}-${message.role}`}><span>{message.role === "user" ? "YOU" : model?.displayName?.toUpperCase() || "ASSISTANT"}</span><p>{message.content || (message.partial ? "Waiting for the first response..." : "")}</p>{message.partial && <span className="stream-indicator"><i />{status === "streaming" ? "STREAMING" : "PARTIAL · NOT COMPLETE"}</span>}</article>)}</div>
-      {statusCopy && <div className={`playground-state ${statusTone}`} role="status"><span className="state-indicator" />{statusCopy}{status === "failed" && lastUser && hasActiveKey && balanceLoaded && positiveBalance(balance) && operational(model) && <button onClick={() => void submit(undefined, lastUser)}>Retry last prompt</button>}{zeroCompute && <button onClick={() => void refreshAllowance()}>Refresh allowance ↻</button>}</div>}
+      {statusCopy && <div className={`playground-state ${statusTone}`} role="status"><span className="state-indicator" />{statusCopy}{canRetryLast && <button onClick={() => void submit(undefined, lastUser)}>Retry last prompt</button>}{zeroCompute && <button onClick={() => void refreshAllowance()}>Refresh allowance ↻</button>}</div>}
       {keyGate && <div className={`playground-key-gate${keysError ? " error" : ""}`} role="status" aria-live="polite"><div className="key-gate-copy"><span className="playground-kicker">API KEY REQUIRED</span><p>You need an API key to use the Playground</p><small>{keysError ? keysError : activeKeys.length === 0 && apiKeys.length > 0 ? "The key on this account was revoked. Create a new one to send a message." : "Create a key on the API Keys screen, then return here to send your message."}</small></div><Link className="key-gate-action" href={settingsHref}>Create API key <span aria-hidden="true">↗</span></Link></div>}
       <form className="playground-composer" onSubmit={(event) => void submit(event)}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={composerPlaceholder} aria-label="Prompt" disabled={composerDisabled} onKeyDown={onKeyDown} /><div className="composer-footer"><span>Enter to send <b>·</b> Shift + Enter for a new line</span>{status === "streaming" ? <button className="stop-button" type="button" onClick={() => void stop()}>Stop generation <span aria-hidden="true">■</span></button> : <button type="submit" disabled={!canSubmit}>Send <span aria-hidden="true">↗</span></button>}</div></form><p className="playground-footnote">Compute is reserved and settled by the server from actual provider usage.<>{hasActiveKey && activeKey ? ` Requests are authorized by your account key “${activeKey.name}”.` : ""}</></p>
     </div>{showParameters && <aside className="playground-parameters" id="playground-parameters"><div className="parameters-heading"><div><span className="playground-kicker">SESSION CONTROLS</span><h2>Parameters</h2><p>Only settings supported by this model are sent.</p></div><button type="button" className="parameters-close" onClick={() => setShowParameters(false)} aria-label="Close parameters">×</button></div><label>System prompt<textarea value={parameters.systemPrompt} onChange={(event) => changeParameter("systemPrompt", event.target.value)} placeholder="Optional. Sets assistant behavior." /></label><ParameterRange label="Temperature" value={parameters.temperature} onChange={(value) => changeParameter("temperature", value)} min="0" max="2" step="0.1" enabled={capabilities.temperature} /><ParameterRange label="Top P" value={parameters.topP} onChange={(value) => changeParameter("topP", value)} min="0" max="1" step="0.05" enabled={capabilities.topP} /><ParameterRange label="Max tokens" value={parameters.maxTokens} onChange={(value) => changeParameter("maxTokens", value)} min="1" max="32768" step="1" enabled={capabilities.maxTokens} /><label>Seed <input inputMode="numeric" value={parameters.seed} onChange={(event) => changeParameter("seed", event.target.value)} placeholder={capabilities.seed ? "Random" : "Not supported by this model"} disabled={!capabilities.seed} /></label><label>Stop sequences<textarea value={parameters.stop} onChange={(event) => changeParameter("stop", event.target.value)} placeholder={capabilities.stop ? "One per line" : "Not supported by this model"} disabled={!capabilities.stop} /></label><button type="button" className="parameters-reset" onClick={() => setParameters(initialParameters)}>↶ Reset parameters</button></aside>}</section>

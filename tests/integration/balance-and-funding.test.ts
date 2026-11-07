@@ -302,6 +302,38 @@ run("spendable balance (real Postgres)", () => {
     expect(await accounting.availableComputeMicroUsd(accountId)).toBe(998_800n);
   });
 
+  // The inference reservation cap is a ceiling, not a minimum: an account with a
+  // positive balance below the cap must still be able to run a request, and the
+  // hold must be exactly what it can cover. An exhausted balance is still rejected
+  // rather than becoming a zero-value reservation that skips the balance check.
+  it("holds the smaller of the cap and the available balance, and rejects an empty balance", async () => {
+    const cap = 500_000n;
+
+    const small = await newAccount();
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,'deposit',3000,$2)`, [small, `deposit-${small}`]);
+    const tinyHold = await accounting.reserveCompute(small, `clamp-${Math.random()}`, cap, { channel: "app" });
+    expect(BigInt(tinyHold.reserved_micro_usd)).toBe(3_000n);
+    expect(await accounting.availableComputeMicroUsd(small)).toBe(0n);
+
+    const rich = await newAccount();
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,'deposit',2000000,$2)`, [rich, `deposit-${rich}`]);
+    const fullHold = await accounting.reserveCompute(rich, `cap-${Math.random()}`, cap, { channel: "app" });
+    expect(BigInt(fullHold.reserved_micro_usd)).toBe(cap);
+    expect(await accounting.availableComputeMicroUsd(rich)).toBe(2_000_000n - cap);
+
+    const empty = await newAccount();
+    await expect(accounting.reserveCompute(empty, `empty-${Math.random()}`, cap, { channel: "app" })).rejects.toMatchObject({ code: "INSUFFICIENT_COMPUTE" });
+  });
+
+  // Prepaid GPU blocks stay all-or-nothing: a block is either fully covered or the
+  // machine must not run, so the gpu channel requires the whole estimate.
+  it("requires the full estimate for prepaid GPU blocks", async () => {
+    const accountId = await newAccount();
+    await db.query(`INSERT INTO compute_ledger_entries (account_id, entry_type, amount_micro_usd, idempotency_key) VALUES ($1,'deposit',100000,$2)`, [accountId, `deposit-${accountId}`]);
+    await expect(accounting.reserveCompute(accountId, `gpu-${Math.random()}`, 460_000n, { channel: "gpu" })).rejects.toMatchObject({ code: "INSUFFICIENT_COMPUTE" });
+    expect(await accounting.availableComputeMicroUsd(accountId)).toBe(100_000n);
+  });
+
   // The chat routes save the assistant reply with this exact conflict target. It
   // must restate the partial index's full predicate (inference_id IS NOT NULL AND
   // role='assistant'), or Postgres rejects it (42P10) and every reply is lost.
