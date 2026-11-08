@@ -2,8 +2,7 @@
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-
-const brandIcon = "/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png";
+import { BRAND_LOGO_SRC } from "../lib/brand";
 
 export type WorkspaceSection = "overview" | "playground" | "models" | "usage" | "api-keys" | "gpu";
 
@@ -83,7 +82,7 @@ export default function WorkspaceShell({
       <aside className="compute-sidebar">
         <Link className="compute-brand" href="/">
           <span className="mark">
-            <img src={brandIcon} alt="favicon" />
+            <img src={BRAND_LOGO_SRC} alt="Openweight" />
           </span>
           <span>OPENWEIGHT</span>
         </Link>

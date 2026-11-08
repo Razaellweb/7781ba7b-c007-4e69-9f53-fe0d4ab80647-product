@@ -1,13 +1,17 @@
-/* Supplied Openweight mark: preserve the source image's square ratio and dark treatment. */
-:root {
-  --ow-brand-asset: url("/assets/uploads/favicon-46bce9c075ad43a381f3d77bd6ca099b.png");
-}
+/*
+ * Supplied Openweight mark: preserve the source image's square ratio and dark treatment.
+ *
+ * NOTE: `--ow-brand-asset` is NOT declared here. It is published on <html> by
+ * app/layout.tsx from lib/brand.ts, which is the same module that supplies the
+ * favicon metadata. That keeps the header logo and the browser tab icon on one
+ * source of truth (and gives the mark a versioned, cache-busted URL).
+ */
 
 .ow-mark,
 .dashboard .mark {
   color: transparent;
   background-color: #050505;
-  background-image: var(--ow-brand-asset);
+  background-image: var(--ow-brand-asset, none);
   background-position: center;
   background-repeat: no-repeat;
   background-size: contain;
@@ -29,7 +33,21 @@
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
-  background: #050505 var(--ow-brand-asset) center / contain no-repeat;
+  background: #050505 var(--ow-brand-asset, none) center / contain no-repeat;
+  border-radius: 50%;
+}
+
+/*
+ * Guide topbar mark. The page ships a page-local <style> block that hardcodes a
+ * copy of the asset URL; this higher-specificity rule replaces it with the
+ * shared variable so the guide header can never drift from the favicon.
+ */
+.how-page .how-brand-mark {
+  background-color: #050505;
+  background-image: var(--ow-brand-asset, none);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
   border-radius: 50%;
 }
 
@@ -45,7 +63,7 @@
   display: inline-block;
   width: 27px;
   height: 27px;
-  background: #050505 var(--ow-brand-asset) center / contain no-repeat;
+  background: #050505 var(--ow-brand-asset, none) center / contain no-repeat;
   border-radius: 50%;
 }
 
